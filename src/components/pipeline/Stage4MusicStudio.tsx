@@ -168,10 +168,9 @@ export const Stage4MusicStudio: React.FC<Stage4MusicStudioProps> = ({
       return;
     }
     setErrorMsg(null);
+    const activeMeta = MUSIC_ENGINES.find((m) => m.id === music.engine);
     setStatusNote(
-      music.engine === 'elevenlabs_music'
-        ? 'Composing multi-section score with ElevenLabs Music Composer (15-45s)...'
-        : 'Composing score with ACE-Step Studio (15-45s)...'
+      `Composing multi-section score with ${activeMeta?.label || music.engine} (15-45s)...`
     );
     setIsComposing(true);
     try {
@@ -491,6 +490,14 @@ export const Stage4MusicStudio: React.FC<Stage4MusicStudioProps> = ({
                 );
               })}
             </div>
+
+            {music.engine === 'sonilo_music' && (
+              <div className="p-2.5 rounded-lg bg-[#FAFBFD] border border-[#E2E2E6] text-[11px] text-[#3A3A44]">
+                {music.video
+                  ? 'Video attached: Sonilo v1.1 will compose picture-locked music directly from your video frames.'
+                  : 'Tip: Upload a video above so Sonilo v1.1 can compose picture-locked music directly to footage (uses Text-to-Music otherwise).'}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div className="col-span-2">

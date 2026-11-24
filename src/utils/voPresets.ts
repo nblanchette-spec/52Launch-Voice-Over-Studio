@@ -1,8 +1,11 @@
 import type {
   EditSfxCategory,
+  EditSfxEngineId,
   EditSfxStageData,
   ElevenLabsTtsModel,
+  FoleyBedEngineId,
   FoleyCategory,
+  FoleyCueEngineId,
   FoleyStageData,
   GeminiTtsModel,
   MusicEngineId,
@@ -691,6 +694,96 @@ export const INSTRUMENTATION_PALETTE: string[] = [
   'Electronic Beat',
 ];
 
+export const FOLEY_CUE_ENGINES: Array<{
+  id: FoleyCueEngineId;
+  label: string;
+  badge: string;
+  description: string;
+}> = [
+  {
+    id: 'mirelo_sfx',
+    label: 'Mirelo SFX 2.0',
+    badge: 'RECOMMENDED FOLEY',
+    description: 'Physical surface & environmental foley synthesis with music-suppression built in.',
+  },
+  {
+    id: 'elevenlabs_sfx',
+    label: 'ElevenLabs SFX v2',
+    badge: 'CRISP DRY CUES',
+    description: 'Clean isolated studio foley props, impacts & close-mic details.',
+  },
+  {
+    id: 'stable_audio_sfx',
+    label: 'Stable Audio 3 SFX',
+    badge: 'TEXTURAL BED',
+    description: 'Diffusion SFX checkpoint for ambient room tones, nature & surface textures.',
+  },
+];
+
+export const FOLEY_BED_ENGINES: Array<{
+  id: FoleyBedEngineId;
+  label: string;
+  badge: string;
+  description: string;
+}> = [
+  {
+    id: 'mirelo_v2a',
+    label: 'Mirelo SFX 2.0 Video-to-Audio',
+    badge: 'BEST VIDEO-TO-FOLEY',
+    description: 'Reads video frames directly and outputs a pure, speech-free WAV/MP3 synced foley track.',
+  },
+  {
+    id: 'hunyuan_foley',
+    label: 'HunyuanVideo-Foley',
+    badge: 'PHYSICAL FOLEY',
+    description: 'Tencent foley model built specifically for real-world physics & contact transients.',
+  },
+  {
+    id: 'thinksound',
+    label: 'ThinkSound CoT',
+    badge: 'VISUAL REASONING',
+    description: 'Chain-of-thought visual reasoning model that infers nuanced object interactions.',
+  },
+  {
+    id: 'mmaudio_v2',
+    label: 'MMAudio V2',
+    badge: 'FAST SYNC',
+    description: 'Rapid frame-locked audio-video foley synthesis.',
+  },
+];
+
+export const EDIT_SFX_ENGINES: Array<{
+  id: EditSfxEngineId;
+  label: string;
+  badge: string;
+  description: string;
+}> = [
+  {
+    id: 'elevenlabs_sfx',
+    label: 'ElevenLabs SFX v2',
+    badge: 'BEST EDIT SFX',
+    description: 'Sharpest commercial transients for air swooshes, hits, risers & UI pops.',
+  },
+  {
+    id: 'sonilo_sfx',
+    label: 'Sonilo v1.1 SFX',
+    badge: 'EDIT PACING',
+    description: 'Purpose-built commercial video SFX model tailored for cuts and motion.',
+  },
+  {
+    id: 'mirelo_sfx',
+    label: 'Mirelo SFX 2.0',
+    badge: 'ACOUSTIC PUNCH',
+    description: 'Clean wide-band cinematic impacts and textured whooshes.',
+  },
+  {
+    id: 'stable_audio_sfx',
+    label: 'Stable Audio 3 SFX',
+    badge: 'SYNTH & GLITCH',
+    description: 'Electronic swells, glitch stutters, risers, and stylized sound design.',
+  },
+];
+
 export const MUSIC_ENGINES: Array<{
   id: MusicEngineId;
   label: string;
@@ -700,28 +793,50 @@ export const MUSIC_ENGINES: Array<{
   {
     id: 'elevenlabs_music',
     label: 'ElevenLabs Music Composer',
-    badge: 'ELEVENLABS',
-    description: 'Uses structured emotional-beat sections (direct or via Fal) for dynamic multi-beat scoring.',
+    badge: 'MULTI-BEAT PLAN',
+    description: 'Executes structured emotional-beat sections with exact durations & instrumentation.',
+  },
+  {
+    id: 'minimax_music',
+    label: 'MiniMax Music v2.6',
+    badge: 'SUNO-CLASS / FAL',
+    description: 'Best Fal alternative to Suno/Treblo — full structural arrangements, vocals or instrumental.',
+  },
+  {
+    id: 'sonilo_music',
+    label: 'Sonilo v1.1 Video-to-Music',
+    badge: 'PICTURE-LOCKED',
+    description: 'Reads your uploaded video directly to compose music matched to scene pacing.',
+  },
+  {
+    id: 'stable_audio_25',
+    label: 'Stable Audio 2.5',
+    badge: 'BROADCAST SCORE',
+    description: 'Clean stereo instrumental underscore, ambient pads, and commercial beds via Fal.',
   },
   {
     id: 'ace_step',
-    label: 'ACE-Step Studio Score',
-    badge: 'FAL ACE-STEP',
-    description: 'High-fidelity tag-driven instrumental/vocal score synthesis via Fal.ai.',
+    label: 'ACE-Step Studio',
+    badge: 'OPEN SCORE',
+    description: 'Tag-driven open music synthesis with structural lyric/section tokens.',
   },
 ];
 
 export const DEFAULT_FOLEY_STAGE: FoleyStageData = {
   video: null,
+  cueEngine: 'mirelo_sfx',
+  bedEngine: 'mirelo_v2a',
   focusPrompt: '',
   analysisSummary: '',
   cues: [],
   syncedBedVideoUrl: null,
+  syncedBedAudioUrl: null,
   syncedBedPrompt: '',
 };
 
 export const DEFAULT_EDIT_SFX_STAGE: EditSfxStageData = {
   video: null,
+  engine: 'elevenlabs_sfx',
   editingStyle: 'Modern sleek commercial cut',
   analysisSummary: '',
   cues: [],

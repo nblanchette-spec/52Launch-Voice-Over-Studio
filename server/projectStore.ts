@@ -554,6 +554,7 @@ export async function importProjectBackupBundle(bundle: {
               }
             : null,
           syncedBedVideoUrl: rewriteUrl(incoming.foley.syncedBedVideoUrl),
+          syncedBedAudioUrl: rewriteUrl(incoming.foley.syncedBedAudioUrl),
           cues: (incoming.foley.cues || []).map((c) => ({
             ...c,
             audioUrl: rewriteUrl(c.audioUrl),

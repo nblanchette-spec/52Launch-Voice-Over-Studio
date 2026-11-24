@@ -13,6 +13,7 @@ import {
 import type {
   EditSfxCategory,
   EditSfxCue,
+  EditSfxEngineId,
   EditSfxStageData,
   PipelineProject,
   UploadedVideoMeta,
@@ -20,6 +21,7 @@ import type {
 import {
   DEFAULT_EDIT_SFX_STAGE,
   EDIT_SFX_CATEGORIES,
+  EDIT_SFX_ENGINES,
   QUICK_EDIT_SFX_PRESETS,
 } from '../../utils/voPresets';
 import { uploadVideoAssetForStage } from '../../utils/videoUtils';
@@ -183,6 +185,7 @@ export const Stage3EditSfxStudio: React.FC<Stage3EditSfxStudioProps> = ({
         sfxPrompt: cue.sfxPrompt,
         durationSec: cue.durationSec,
         promptInfluence: cue.promptInfluence,
+        engine: editSfx.engine || 'elevenlabs_sfx',
       }),
     });
     const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
@@ -431,6 +434,47 @@ export const Stage3EditSfxStudio: React.FC<Stage3EditSfxStudioProps> = ({
             onTimeUpdate={setPlayheadSec}
             seekRequestSec={seekRequest}
           />
+
+          {/* Edit SFX Engine Selector */}
+          <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-[#111114]">
+                Edit SFX Synthesis Model
+              </span>
+              <span className="text-[10px] font-mono text-[#6E6E7A]">
+                Transitions &amp; Graphical SFX
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {EDIT_SFX_ENGINES.map((eng) => {
+                const selected = (editSfx.engine || 'elevenlabs_sfx') === eng.id;
+                return (
+                  <button
+                    key={eng.id}
+                    type="button"
+                    onClick={() =>
+                      saveEditSfxPatch({ engine: eng.id as EditSfxEngineId })
+                    }
+                    className={`p-2 rounded-lg border text-left transition-colors cursor-pointer ${
+                      selected
+                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                        : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] font-bold truncate">{eng.label}</span>
+                      <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-[#111114] text-white shrink-0">
+                        {eng.badge}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-[#5A5A66] mt-0.5 leading-snug line-clamp-2">
+                      {eng.description}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-3">
             <div className="flex items-center justify-between">

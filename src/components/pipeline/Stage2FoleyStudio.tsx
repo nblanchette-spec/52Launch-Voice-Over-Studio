@@ -12,13 +12,20 @@ import {
   Wand2,
 } from 'lucide-react';
 import type {
+  FoleyBedEngineId,
   FoleyCategory,
   FoleyCue,
+  FoleyCueEngineId,
   FoleyStageData,
   PipelineProject,
   UploadedVideoMeta,
 } from '../../types/pipeline';
-import { DEFAULT_FOLEY_STAGE, FOLEY_CATEGORIES } from '../../utils/voPresets';
+import {
+  DEFAULT_FOLEY_STAGE,
+  FOLEY_BED_ENGINES,
+  FOLEY_CATEGORIES,
+  FOLEY_CUE_ENGINES,
+} from '../../utils/voPresets';
 import { uploadVideoAssetForStage } from '../../utils/videoUtils';
 import { exportCueTimelineAudioMix } from '../../utils/voAudioEngine';
 import { parseJsonResponse } from '../../utils/safeFetch';
@@ -106,6 +113,7 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
           ...foley,
           video: meta,
           syncedBedVideoUrl: null,
+          syncedBedAudioUrl: null,
         },
       });
       setStatusNote(
@@ -126,6 +134,7 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
         ...foley,
         video,
         syncedBedVideoUrl: null,
+        syncedBedAudioUrl: null,
       },
     });
     setStatusNote(`Attached "${video.filename}" to Foley SFX Studio.`);
@@ -176,6 +185,7 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
         foleyPrompt: cue.foleyPrompt,
         durationSec: cue.durationSec,
         promptInfluence: cue.promptInfluence,
+        engine: foley.cueEngine || 'mirelo_sfx',
       }),
     });
     const data = await parseJsonResponse<{ project: PipelineProject; error?: string }>(
@@ -229,8 +239,12 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
       setErrorMsg('Upload a video first.');
       return;
     }
+    const activeBedEngine: FoleyBedEngineId = foley.bedEngine || 'mirelo_v2a';
+    const bedMeta = FOLEY_BED_ENGINES.find((b) => b.id === activeBedEngine);
     setErrorMsg(null);
-    setStatusNote('Synthesizing full synced video foley bed via MMAudio V2 (this may take 20-45s)...');
+    setStatusNote(
+      `Synthesizing full synced video foley bed via ${bedMeta?.label || activeBedEngine} (this may take 20-45s)...`
+    );
     setIsGeneratingBed(true);
     try {
       const resp = await fetch('/api/pipeline/foley-video-bed', {
@@ -239,16 +253,23 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
         body: JSON.stringify({
           projectId: project.id,
           prompt: foley.focusPrompt || foley.analysisSummary,
+          bedEngine: activeBedEngine,
         }),
       });
       const data = await parseJsonResponse<{
         project: PipelineProject;
-        syncedBedVideoUrl: string;
+        mediaType?: 'audio' | 'video';
+        syncedBedVideoUrl?: string | null;
+        syncedBedAudioUrl?: string | null;
         error?: string;
       }>(resp, 'Could not synthesize full-video foley bed.');
       if (!resp.ok) throw new Error(data.error || 'Could not synthesize full-video foley bed.');
       onProjectUpdated(data.project);
-      setStatusNote('Synced MMAudio V2 foley video ready below.');
+      setStatusNote(
+        data.mediaType === 'audio'
+          ? `Synced ${bedMeta?.label || 'Mirelo'} foley audio track loaded into Sync Player & ready to download below.`
+          : `Synced ${bedMeta?.label || 'Video Foley'} render ready below.`
+      );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Synced video foley bed failed.');
     } finally {
@@ -414,7 +435,7 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
               type="button"
               disabled={isGeneratingBed}
               onClick={() => void handleGenerateSyncedVideoBed()}
-              title="Uses MMAudio V2 via Fal to render a continuous synced foley audio-video mux"
+              title="Uses the selected Full-Video Foley Bed engine to score continuous on-camera foley directly from picture"
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[#24242B] bg-white border border-[#E2E2E6] hover:border-[#891A23] disabled:opacity-40 rounded-lg cursor-pointer transition-colors"
             >
               {isGeneratingBed ? (
@@ -462,6 +483,7 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
           <SyncedVideoCuePlayer
             video={foley.video}
             cues={timelineItems}
+            masterTrackUrl={foley.syncedBedAudioUrl}
             isUploadingVideo={isUploadingVideo}
             uploadError={uploadError}
             stageLabel="Foley SFX"
@@ -472,6 +494,91 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
             onTimeUpdate={setPlayheadSec}
             seekRequestSec={seekRequest}
           />
+
+          {/* Foley Engines Selector */}
+          <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-3.5">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#111114]">
+                  Individual Foley Cue Model
+                </span>
+                <span className="text-[10px] font-mono text-[#6E6E7A]">
+                  Per-Timestamp Stems
+                </span>
+              </div>
+              <div className="grid grid-cols-1 gap-1.5">
+                {FOLEY_CUE_ENGINES.map((eng) => {
+                  const selected = (foley.cueEngine || 'mirelo_sfx') === eng.id;
+                  return (
+                    <button
+                      key={eng.id}
+                      type="button"
+                      onClick={() =>
+                        saveFoleyPatch({ cueEngine: eng.id as FoleyCueEngineId })
+                      }
+                      className={`p-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                        selected
+                          ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                          : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold">{eng.label}</span>
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#111114] text-white">
+                          {eng.badge}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-[#5A5A66] mt-0.5 leading-snug">
+                        {eng.description}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {falConfigured && (
+              <div className="space-y-2 pt-3 border-t border-[#E2E2E6]">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#111114]">
+                    Full-Video Synced Foley Model
+                  </span>
+                  <span className="text-[10px] font-mono text-[#6E6E7A]">
+                    Direct Video-to-Foley
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {FOLEY_BED_ENGINES.map((eng) => {
+                    const selected = (foley.bedEngine || 'mirelo_v2a') === eng.id;
+                    return (
+                      <button
+                        key={eng.id}
+                        type="button"
+                        onClick={() =>
+                          saveFoleyPatch({ bedEngine: eng.id as FoleyBedEngineId })
+                        }
+                        className={`p-2 rounded-lg border text-left transition-colors cursor-pointer ${
+                          selected
+                            ? 'bg-[#FDF2F3] border-[#C6202F] text-[#891A23]'
+                            : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-[11px] font-bold truncate">{eng.label}</span>
+                          <span className="text-[8px] font-mono px-1 py-0.5 rounded bg-[#111114] text-white shrink-0">
+                            {eng.badge}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-[#5A5A66] mt-0.5 leading-snug line-clamp-2">
+                          {eng.description}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-3">
             <div className="flex items-center justify-between">
@@ -497,11 +604,39 @@ export const Stage2FoleyStudio: React.FC<Stage2FoleyStudioProps> = ({
             )}
           </div>
 
+          {foley.syncedBedAudioUrl && (
+            <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#111114]">
+                  Synced Video-to-Foley Audio Track (Master Sync)
+                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => saveFoleyPatch({ syncedBedAudioUrl: null })}
+                    className="text-[11px] text-[#6E6E7A] hover:text-[#C6202F] cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                  <a
+                    href={foley.syncedBedAudioUrl}
+                    download={`foley-bed-${project.id}.mp3`}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-[#C6202F] hover:underline"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download Audio
+                  </a>
+                </div>
+              </div>
+              <audio src={foley.syncedBedAudioUrl} controls className="w-full h-8" />
+            </div>
+          )}
+
           {foley.syncedBedVideoUrl && (
             <div className="bg-white border border-[#E2E2E6] rounded-xl p-4 space-y-2.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-[#111114]">
-                  MMAudio V2 Full-Video Foley Render
+                  Synced Full-Video Foley Render
                 </span>
                 <a
                   href={foley.syncedBedVideoUrl}

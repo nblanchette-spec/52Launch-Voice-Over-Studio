@@ -17,10 +17,13 @@ import {
 import type {
   EditSfxCategory,
   EditSfxCue,
+  EditSfxEngineId,
   ElevenLabsTtsModel,
   EmotionalBeat,
+  FoleyBedEngineId,
   FoleyCategory,
   FoleyCue,
+  FoleyCueEngineId,
   GeminiTtsModel,
   MusicEngineId,
   PipelineProject,
@@ -1499,12 +1502,13 @@ Return a JSON object with:
 
   router.post('/pipeline/foley-generate', async (req, res) => {
     try {
-      const { projectId, cueId, foleyPrompt, durationSec, promptInfluence } = req.body as {
+      const { projectId, cueId, foleyPrompt, durationSec, promptInfluence, engine } = req.body as {
         projectId: string;
         cueId: string;
         foleyPrompt?: string;
         durationSec?: number;
         promptInfluence?: number;
+        engine?: FoleyCueEngineId;
       };
       const project = await getProject(projectId);
       if (!project) {
@@ -1519,11 +1523,14 @@ Return a JSON object with:
       const finalPrompt = (foleyPrompt ?? target.foleyPrompt).trim();
       const finalDuration = durationSec ?? target.durationSec;
       const finalInfluence = promptInfluence ?? target.promptInfluence;
+      const activeCueEngine: FoleyCueEngineId =
+        engine || project.foley?.cueEngine || 'mirelo_sfx';
 
       const generated = await generateSoundEffect({
         prompt: finalPrompt,
         durationSec: finalDuration,
         promptInfluence: finalInfluence,
+        engine: activeCueEngine,
       });
 
       const savedAsset = await saveBufferAsset(
@@ -1551,6 +1558,7 @@ Return a JSON object with:
         foley: {
           ...DEFAULT_FOLEY_STAGE,
           ...(project.foley || {}),
+          cueEngine: activeCueEngine,
           cues: nextCues,
         },
         generationLog: [
@@ -1579,9 +1587,10 @@ Return a JSON object with:
 
   router.post('/pipeline/foley-video-bed', async (req, res) => {
     try {
-      const { projectId, prompt } = req.body as {
+      const { projectId, prompt, bedEngine } = req.body as {
         projectId: string;
         prompt?: string;
+        bedEngine?: FoleyBedEngineId;
       };
       const project = await getProject(projectId);
       if (!project) {
@@ -1596,6 +1605,9 @@ Return a JSON object with:
         return res.status(400).json({ error: 'Uploaded video file could not be located on disk.' });
       }
 
+      const activeBedEngine: FoleyBedEngineId =
+        bedEngine || project.foley?.bedEngine || 'mirelo_v2a';
+
       const bedPrompt =
         prompt?.trim() ||
         project.foley?.analysisSummary ||
@@ -1605,13 +1617,14 @@ Return a JSON object with:
         videoFilePath: resolved.filePath,
         videoMimeType: video.mimeType,
         prompt: bedPrompt,
-        durationSec: Math.min(30, Math.max(2, Math.round(video.durationSec || 8))),
+        durationSec: Math.min(60, Math.max(2, Math.round(video.durationSec || 8))),
+        engine: activeBedEngine,
       });
 
       const savedAsset = await saveBufferAsset(
         project.id,
-        generated.videoBuffer,
-        'foley-bed',
+        generated.buffer,
+        generated.mediaType === 'audio' ? 'foley-bed-audio' : 'foley-bed',
         generated.ext
       );
 
@@ -1620,7 +1633,11 @@ Return a JSON object with:
         foley: {
           ...DEFAULT_FOLEY_STAGE,
           ...(project.foley || {}),
-          syncedBedVideoUrl: savedAsset.url,
+          bedEngine: activeBedEngine,
+          syncedBedAudioUrl:
+            generated.mediaType === 'audio' ? savedAsset.url : project.foley?.syncedBedAudioUrl ?? null,
+          syncedBedVideoUrl:
+            generated.mediaType === 'video' ? savedAsset.url : project.foley?.syncedBedVideoUrl ?? null,
           syncedBedPrompt: bedPrompt,
         },
         generationLog: [
@@ -1638,7 +1655,12 @@ Return a JSON object with:
       };
 
       const saved = await saveProject(nextProject);
-      res.json({ project: saved, syncedBedVideoUrl: savedAsset.url });
+      res.json({
+        project: saved,
+        mediaType: generated.mediaType,
+        syncedBedVideoUrl: saved.foley?.syncedBedVideoUrl || null,
+        syncedBedAudioUrl: saved.foley?.syncedBedAudioUrl || null,
+      });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Could not synthesize full-video foley bed.',
@@ -1772,12 +1794,13 @@ Return a JSON object with:
 
   router.post('/pipeline/sfx-generate', async (req, res) => {
     try {
-      const { projectId, cueId, sfxPrompt, durationSec, promptInfluence } = req.body as {
+      const { projectId, cueId, sfxPrompt, durationSec, promptInfluence, engine } = req.body as {
         projectId: string;
         cueId: string;
         sfxPrompt?: string;
         durationSec?: number;
         promptInfluence?: number;
+        engine?: EditSfxEngineId;
       };
       const project = await getProject(projectId);
       if (!project) {
@@ -1792,11 +1815,14 @@ Return a JSON object with:
       const finalPrompt = (sfxPrompt ?? target.sfxPrompt).trim();
       const finalDuration = durationSec ?? target.durationSec;
       const finalInfluence = promptInfluence ?? target.promptInfluence;
+      const activeSfxEngine: EditSfxEngineId =
+        engine || project.editSfx?.engine || 'elevenlabs_sfx';
 
       const generated = await generateSoundEffect({
         prompt: finalPrompt,
         durationSec: finalDuration,
         promptInfluence: finalInfluence,
+        engine: activeSfxEngine,
       });
 
       const savedAsset = await saveBufferAsset(
@@ -1824,6 +1850,7 @@ Return a JSON object with:
         editSfx: {
           ...DEFAULT_EDIT_SFX_STAGE,
           ...(project.editSfx || {}),
+          engine: activeSfxEngine,
           cues: nextCues,
         },
         generationLog: [
@@ -2053,8 +2080,17 @@ Return a JSON object with:
         ...(project.music || {}),
       };
 
-      const finalEngine: MusicEngineId =
-        engine === 'ace_step' ? 'ace_step' : engine || musicState.engine || 'elevenlabs_music';
+      const VALID_MUSIC_ENGINES: MusicEngineId[] = [
+        'elevenlabs_music',
+        'minimax_music',
+        'sonilo_music',
+        'stable_audio_25',
+        'ace_step',
+      ];
+      const requestedEngine = engine || musicState.engine || 'elevenlabs_music';
+      const finalEngine: MusicEngineId = VALID_MUSIC_ENGINES.includes(requestedEngine)
+        ? requestedEngine
+        : 'elevenlabs_music';
       const finalGenre = genre ?? musicState.genre;
       const finalBpm = bpm ?? musicState.bpm;
       const finalKey = musicalKey ?? musicState.musicalKey;
@@ -2073,6 +2109,10 @@ Return a JSON object with:
         Math.round(musicState.video?.durationSec || beatsDuration || 30)
       );
 
+      const videoResolved = musicState.video?.assetUrl
+        ? resolveProjectAssetPath(project.id, musicState.video.assetUrl)
+        : null;
+
       const composed = await generateMusicScore({
         engine: finalEngine,
         genre: finalGenre,
@@ -2084,6 +2124,8 @@ Return a JSON object with:
         customDirection: finalDir,
         beats: finalBeats,
         targetDurationSec,
+        videoFilePath: videoResolved?.filePath || null,
+        videoMimeType: musicState.video?.mimeType,
       });
 
       const savedAsset = await saveBufferAsset(

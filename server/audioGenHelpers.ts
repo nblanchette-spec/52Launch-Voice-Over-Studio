@@ -1,41 +1,51 @@
 import fs from 'fs/promises';
 import { fal } from '@fal-ai/client';
-import type { EmotionalBeat, MusicEngineId } from '../src/types/pipeline.ts';
+import type {
+  EditSfxEngineId,
+  EmotionalBeat,
+  FoleyBedEngineId,
+  FoleyCueEngineId,
+  MusicEngineId,
+} from '../src/types/pipeline.ts';
 
-function clampNumber(val: number | undefined, min: number, max: number, fallback: number): number {
+function clampNumber(
+  val: number | undefined,
+  min: number,
+  max: number,
+  fallback: number
+): number {
   const n = Number(val);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
 }
 
-export async function generateSoundEffect(options: {
-  prompt: string;
-  durationSec?: number;
-  promptInfluence?: number;
-}): Promise<{
+async function downloadAudioUrl(
+  url: string,
+  fallbackMime = 'audio/mpeg'
+): Promise<{ audioBuffer: Buffer; mimeType: string; ext: 'mp3' | 'wav' }> {
+  const dl = await fetch(url);
+  if (!dl.ok) {
+    throw new Error(`Could not download generated audio (${dl.status}).`);
+  }
+  const headerMime = dl.headers.get('content-type')?.split(';')[0]?.trim();
+  const mimeType = headerMime || fallbackMime;
+  const audioBuffer = Buffer.from(await dl.arrayBuffer());
+  const ext: 'mp3' | 'wav' = mimeType.includes('wav') ? 'wav' : 'mp3';
+  return { audioBuffer, mimeType, ext };
+}
+
+async function generateWithElevenLabsSfx(
+  text: string,
+  durationSeconds: number,
+  promptInfluence: number,
+  apiKey?: string,
+  falKey?: string
+): Promise<{
   audioBuffer: Buffer;
   mimeType: string;
   ext: 'mp3' | 'wav';
   engineUsed: string;
 }> {
-  const text = options.prompt.trim();
-  if (!text) {
-    throw new Error('Describe the sound effect before generating.');
-  }
-
-  const durationSeconds = Number(clampNumber(options.durationSec, 0.5, 22, 2.5).toFixed(1));
-  const promptInfluence = Number(clampNumber(options.promptInfluence, 0, 1, 0.45).toFixed(2));
-
-  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
-  const falKey = process.env.FAL_KEY?.trim();
-
-  if (!apiKey && !falKey) {
-    throw new Error(
-      'Sound generation requires ELEVENLABS_API_KEY or FAL_KEY in Settings > Secrets.'
-    );
-  }
-
-  // 1. Direct ElevenLabs Sound Generation API
   if (apiKey) {
     const resp = await fetch('https://api.elevenlabs.io/v1/sound-generation', {
       method: 'POST',
@@ -75,8 +85,11 @@ export async function generateSoundEffect(options: {
     }
   }
 
-  // 2. Fal.ai ElevenLabs Sound Effects fallback
-  fal.config({ credentials: falKey! });
+  if (!falKey) {
+    throw new Error('ElevenLabs SFX requires ELEVENLABS_API_KEY or FAL_KEY in Settings > Secrets.');
+  }
+
+  fal.config({ credentials: falKey });
   const result = await fal.subscribe('fal-ai/elevenlabs/sound-effects/v2', {
     input: {
       text,
@@ -92,20 +105,122 @@ export async function generateSoundEffect(options: {
     throw new Error('Fal ElevenLabs Sound Effects did not return an audio file.');
   }
 
-  const dl = await fetch(audioUrl);
-  if (!dl.ok) {
-    throw new Error(`Could not download generated SFX (${dl.status}).`);
-  }
-  const audioBuffer = Buffer.from(await dl.arrayBuffer());
-  const mime = data?.audio?.content_type || 'audio/mpeg';
-  const ext: 'mp3' | 'wav' = mime.includes('wav') ? 'wav' : 'mp3';
-
+  const dl = await downloadAudioUrl(audioUrl, data?.audio?.content_type || 'audio/mpeg');
   return {
-    audioBuffer,
-    mimeType: mime,
-    ext,
+    ...dl,
+    mimeType: data?.audio?.content_type || dl.mimeType,
     engineUsed: 'fal-elevenlabs-sfx-v2',
   };
+}
+
+export async function generateSoundEffect(options: {
+  prompt: string;
+  durationSec?: number;
+  promptInfluence?: number;
+  engine?: FoleyCueEngineId | EditSfxEngineId;
+}): Promise<{
+  audioBuffer: Buffer;
+  mimeType: string;
+  ext: 'mp3' | 'wav';
+  engineUsed: string;
+}> {
+  const text = options.prompt.trim();
+  if (!text) {
+    throw new Error('Describe the sound effect before generating.');
+  }
+
+  const durationSeconds = Number(clampNumber(options.durationSec, 0.5, 22, 2.5).toFixed(1));
+  const promptInfluence = Number(clampNumber(options.promptInfluence, 0, 1, 0.55).toFixed(2));
+  const engine = options.engine || 'elevenlabs_sfx';
+
+  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+  const falKey = process.env.FAL_KEY?.trim();
+
+  if (!apiKey && !falKey) {
+    throw new Error(
+      'Sound generation requires FAL_KEY or ELEVENLABS_API_KEY in Settings > Secrets.'
+    );
+  }
+
+  // If a Fal-specific model was chosen but only ELEVENLABS_API_KEY is configured, degrade cleanly
+  if (engine !== 'elevenlabs_sfx' && !falKey) {
+    return generateWithElevenLabsSfx(text, durationSeconds, promptInfluence, apiKey, undefined);
+  }
+
+  if (engine === 'mirelo_sfx') {
+    fal.config({ credentials: falKey! });
+    const res = await fal.subscribe('mirelo-ai/sfx2.0/text-to-audio', {
+      input: {
+        prompt: text,
+        duration: clampNumber(durationSeconds, 1, 30, 3),
+        negative_prompt: 'music, singing, speech, dialogue, background chatter',
+        num_samples: 1,
+        upload_audio_format: 'mp3',
+      },
+      logs: false,
+    });
+    const data = res.data as {
+      audio?: Array<{ url?: string; content_type?: string }> | { url?: string; content_type?: string };
+    };
+    const item = Array.isArray(data?.audio) ? data.audio[0] : data?.audio;
+    if (!item?.url) {
+      throw new Error('Mirelo SFX 2.0 did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(item.url, item.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: item.content_type || dl.mimeType,
+      engineUsed: 'fal-mirelo-sfx-v2',
+    };
+  }
+
+  if (engine === 'sonilo_sfx') {
+    fal.config({ credentials: falKey! });
+    const res = await fal.subscribe('sonilo/v1.1/text-to-sound-effects', {
+      input: {
+        prompt: text,
+        duration: clampNumber(durationSeconds, 0.5, 60, 2.5),
+        audio_format: 'mp3',
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('Sonilo v1.1 SFX did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-sonilo-v1.1-sfx',
+    };
+  }
+
+  if (engine === 'stable_audio_sfx') {
+    fal.config({ credentials: falKey! });
+    const res = await fal.subscribe('fal-ai/stable-audio-3/small/sfx/text-to-audio', {
+      input: {
+        prompt: text,
+        duration: clampNumber(durationSeconds, 0.5, 45, 3),
+        negative_prompt: 'music, speech, singing, low quality, distortion',
+        guidance_scale: Math.round((4 + promptInfluence * 6) * 10) / 10,
+        output_format: 'mp3',
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('Stable Audio 3 SFX did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-stable-audio-3-sfx',
+    };
+  }
+
+  return generateWithElevenLabsSfx(text, durationSeconds, promptInfluence, apiKey, falKey);
 }
 
 export async function generateSyncedFoleyVideoBed(options: {
@@ -113,31 +228,121 @@ export async function generateSyncedFoleyVideoBed(options: {
   videoMimeType: string;
   prompt: string;
   durationSec?: number;
+  engine?: FoleyBedEngineId;
 }): Promise<{
-  videoBuffer: Buffer;
+  mediaType: 'audio' | 'video';
+  buffer: Buffer;
   mimeType: string;
-  ext: 'mp4';
+  ext: 'mp3' | 'wav' | 'mp4';
   engineUsed: string;
 }> {
   const falKey = process.env.FAL_KEY?.trim();
   if (!falKey) {
-    throw new Error('Full-video MMAudio V2 foley synthesis requires FAL_KEY in Settings > Secrets.');
+    throw new Error('Full-video foley bed synthesis requires FAL_KEY in Settings > Secrets.');
   }
 
+  const engine: FoleyBedEngineId = options.engine || 'mirelo_v2a';
   fal.config({ credentials: falKey });
+
   const buf = await fs.readFile(options.videoFilePath);
   const uploadedVideoUrl = await fal.storage.upload(
     new Blob([new Uint8Array(buf)], { type: options.videoMimeType || 'video/mp4' })
   );
 
-  const duration = Math.round(clampNumber(options.durationSec, 1, 30, 8));
+  const foleyPrompt =
+    options.prompt.trim() ||
+    'Organic realistic on-camera foley audio matching footsteps, surfaces, handling, and natural room tone';
+  const duration = Math.round(clampNumber(options.durationSec, 1, 60, 8));
+
+  if (engine === 'mirelo_v2a') {
+    const res = await fal.subscribe('mirelo-ai/sfx2.0/video-to-audio', {
+      input: {
+        video_url: uploadedVideoUrl,
+        text_prompt: foleyPrompt,
+        negative_prompt: 'music, soundtrack, singing, dialogue',
+        duration,
+        num_samples: 1,
+        preserve_speech: false,
+        upload_audio_format: 'mp3',
+      },
+      logs: false,
+    });
+    const data = res.data as {
+      audio?: Array<{ url?: string; content_type?: string }> | { url?: string; content_type?: string };
+    };
+    const item = Array.isArray(data?.audio) ? data.audio[0] : data?.audio;
+    if (!item?.url) {
+      throw new Error('Mirelo SFX 2.0 Video-to-Audio did not return a foley track.');
+    }
+    const dl = await downloadAudioUrl(item.url, item.content_type || 'audio/mpeg');
+    return {
+      mediaType: 'audio',
+      buffer: dl.audioBuffer,
+      mimeType: item.content_type || dl.mimeType,
+      ext: dl.ext,
+      engineUsed: 'fal-mirelo-sfx2-video-to-audio',
+    };
+  }
+
+  if (engine === 'hunyuan_foley') {
+    const res = await fal.subscribe('fal-ai/hunyuan-video-foley', {
+      input: {
+        video_url: uploadedVideoUrl,
+        text_prompt: foleyPrompt,
+        negative_prompt: 'noisy, harsh, background music, singing',
+        guidance_scale: 4.5,
+      },
+      logs: false,
+    });
+    const data = res.data as { video?: { url?: string; content_type?: string } };
+    if (!data?.video?.url) {
+      throw new Error('HunyuanVideo-Foley completed without returning a synced video.');
+    }
+    const dl = await fetch(data.video.url);
+    if (!dl.ok) {
+      throw new Error(`Could not download HunyuanVideo-Foley video (${dl.status}).`);
+    }
+    return {
+      mediaType: 'video',
+      buffer: Buffer.from(await dl.arrayBuffer()),
+      mimeType: data.video.content_type || 'video/mp4',
+      ext: 'mp4',
+      engineUsed: 'fal-hunyuan-video-foley',
+    };
+  }
+
+  if (engine === 'thinksound') {
+    const res = await fal.subscribe('fal-ai/thinksound', {
+      input: {
+        video_url: uploadedVideoUrl,
+        prompt: foleyPrompt,
+        cfg_scale: 5,
+      },
+      logs: false,
+    });
+    const data = res.data as { video?: { url?: string; content_type?: string } };
+    if (!data?.video?.url) {
+      throw new Error('ThinkSound CoT completed without returning a synced video.');
+    }
+    const dl = await fetch(data.video.url);
+    if (!dl.ok) {
+      throw new Error(`Could not download ThinkSound foley video (${dl.status}).`);
+    }
+    return {
+      mediaType: 'video',
+      buffer: Buffer.from(await dl.arrayBuffer()),
+      mimeType: data.video.content_type || 'video/mp4',
+      ext: 'mp4',
+      engineUsed: 'fal-thinksound',
+    };
+  }
+
+  // Fallback / default: MMAudio V2
   const result = await fal.subscribe('fal-ai/mmaudio-v2', {
     input: {
       video_url: uploadedVideoUrl,
-      prompt:
-        options.prompt.trim() ||
-        'Organic realistic on-camera foley audio matching footsteps, surfaces, handling, and natural room tone',
-      duration,
+      prompt: foleyPrompt,
+      duration: Math.min(30, duration),
     },
     logs: false,
   });
@@ -154,7 +359,8 @@ export async function generateSyncedFoleyVideoBed(options: {
   }
 
   return {
-    videoBuffer: Buffer.from(await dl.arrayBuffer()),
+    mediaType: 'video',
+    buffer: Buffer.from(await dl.arrayBuffer()),
     mimeType: data?.video?.content_type || 'video/mp4',
     ext: 'mp4',
     engineUsed: 'fal-mmaudio-v2',
@@ -194,6 +400,7 @@ function buildMusicPromptAndPlan(options: {
     options.forceInstrumental ? 'Strictly instrumental, no lead vocals.' : '',
     beatTimelineDesc ? `Emotional progression: ${beatTimelineDesc}.` : '',
     options.customDirection?.trim() ? `Direction: ${options.customDirection.trim()}.` : '',
+    options.negativeStyles?.trim() ? `Avoid: ${options.negativeStyles.trim()}.` : '',
   ].filter(Boolean);
 
   const prompt = promptParts.join(' ').slice(0, 3900);
@@ -263,6 +470,7 @@ function buildMusicPromptAndPlan(options: {
   return {
     prompt,
     totalSec: Math.round(totalSec),
+    sortedBeats,
     compositionPlan: {
       positive_global_styles: positiveGlobal,
       negative_global_styles: negativeGlobal,
@@ -282,6 +490,8 @@ export async function generateMusicScore(options: {
   customDirection: string;
   beats: EmotionalBeat[];
   targetDurationSec: number;
+  videoFilePath?: string | null;
+  videoMimeType?: string;
 }): Promise<{
   audioBuffer: Buffer;
   mimeType: string;
@@ -299,10 +509,9 @@ export async function generateMusicScore(options: {
     );
   }
 
-  const { prompt, totalSec, compositionPlan } = buildMusicPromptAndPlan(options);
+  const { prompt, totalSec, sortedBeats, compositionPlan } = buildMusicPromptAndPlan(options);
 
   if (options.engine === 'elevenlabs_music' && apiKey) {
-    // Try structured composition_plan first for exact emotional beat alignment
     const planResp = await fetch(
       'https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128',
       {
@@ -331,7 +540,6 @@ export async function generateMusicScore(options: {
       };
     }
 
-    // Fallback to prompt + music_length_ms if plan parameters hit 422
     const promptResp = await fetch(
       'https://api.elevenlabs.io/v1/music?output_format=mp3_44100_128',
       {
@@ -385,35 +593,149 @@ export async function generateMusicScore(options: {
   fal.config({ credentials: falKey });
 
   if (options.engine === 'elevenlabs_music') {
-    try {
-      const res = await fal.subscribe('fal-ai/elevenlabs/music', {
+    const res = await fal.subscribe('fal-ai/elevenlabs/music', {
+      input: {
+        prompt,
+        music_length_ms: Math.round(clampNumber(totalSec, 3, 300, 30) * 1000),
+        force_instrumental: options.forceInstrumental,
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('Fal ElevenLabs Music did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-elevenlabs-music',
+      promptSummary: prompt,
+      durationSec: totalSec,
+    };
+  }
+
+  if (options.engine === 'minimax_music') {
+    const customLyrics = sortedBeats
+      .map((b, idx) => {
+        const tag =
+          idx === 0
+            ? '[Intro]'
+            : idx === sortedBeats.length - 1
+              ? '[Outro]'
+              : b.energy >= 8
+                ? '[Chorus]'
+                : '[Bridge]';
+        const line = b.lyricsLine?.trim();
+        return line ? `${tag}\n${line}` : `${tag}\n[Inst]`;
+      })
+      .join('\n')
+      .slice(0, 3400);
+
+    const hasLyricsText = sortedBeats.some((b) => Boolean(b.lyricsLine?.trim()));
+
+    const res = await fal.subscribe('fal-ai/minimax-music/v2.6', {
+      input: {
+        prompt: prompt.slice(0, 1980),
+        is_instrumental: options.forceInstrumental,
+        lyrics: options.forceInstrumental
+          ? '[Intro]\n[Inst]\n[Bridge]\n[Solo]\n[Outro]'
+          : hasLyricsText
+            ? customLyrics
+            : '',
+        lyrics_optimizer: !options.forceInstrumental && !hasLyricsText,
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('MiniMax Music v2.6 did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-minimax-music-v2.6',
+      promptSummary: prompt,
+      durationSec: totalSec,
+    };
+  }
+
+  if (options.engine === 'sonilo_music') {
+    if (options.videoFilePath) {
+      const videoBuf = await fs.readFile(options.videoFilePath);
+      const uploadedVideoUrl = await fal.storage.upload(
+        new Blob([new Uint8Array(videoBuf)], {
+          type: options.videoMimeType || 'video/mp4',
+        })
+      );
+      const res = await fal.subscribe('sonilo/v1.1/video-to-music', {
         input: {
-          prompt,
-          music_length_ms: Math.round(clampNumber(totalSec, 3, 300, 30) * 1000),
-          force_instrumental: options.forceInstrumental,
+          video_url: uploadedVideoUrl,
+          prompt: prompt.slice(0, 1500),
+          prompt_influence: 0.65,
+          duration: clampNumber(totalSec, 1, 180, 30),
+          num_samples: 1,
         },
         logs: false,
       });
       const data = res.data as { audio?: { url?: string; content_type?: string } };
-      const audioUrl = data?.audio?.url;
-      if (audioUrl) {
-        const dl = await fetch(audioUrl);
-        if (dl.ok) {
-          const audioBuffer = Buffer.from(await dl.arrayBuffer());
-          const mime = data?.audio?.content_type || 'audio/mpeg';
-          return {
-            audioBuffer,
-            mimeType: mime,
-            ext: mime.includes('wav') ? 'wav' : 'mp3',
-            engineUsed: 'fal-elevenlabs-music',
-            promptSummary: prompt,
-            durationSec: totalSec,
-          };
-        }
+      if (!data?.audio?.url) {
+        throw new Error('Sonilo v1.1 Video-to-Music did not return an audio file.');
       }
-    } catch {
-      // Fall through to ACE-Step if Fal ElevenLabs music fails
+      const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+      return {
+        ...dl,
+        mimeType: data.audio.content_type || dl.mimeType,
+        engineUsed: 'fal-sonilo-v1.1-video-to-music',
+        promptSummary: prompt,
+        durationSec: totalSec,
+      };
     }
+
+    const res = await fal.subscribe('sonilo/v1.1/text-to-music', {
+      input: {
+        prompt: prompt.slice(0, 1500),
+        duration: clampNumber(totalSec, 5, 180, 30),
+        num_samples: 1,
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('Sonilo v1.1 Text-to-Music did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/mpeg');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-sonilo-v1.1-text-to-music',
+      promptSummary: prompt,
+      durationSec: totalSec,
+    };
+  }
+
+  if (options.engine === 'stable_audio_25') {
+    const res = await fal.subscribe('fal-ai/stable-audio-25/text-to-audio', {
+      input: {
+        prompt: prompt.slice(0, 1900),
+        seconds_total: clampNumber(totalSec, 5, 190, 30),
+        guidance_scale: 4.5,
+      },
+      logs: false,
+    });
+    const data = res.data as { audio?: { url?: string; content_type?: string } };
+    if (!data?.audio?.url) {
+      throw new Error('Stable Audio 2.5 did not return an audio file.');
+    }
+    const dl = await downloadAudioUrl(data.audio.url, data.audio.content_type || 'audio/wav');
+    return {
+      ...dl,
+      mimeType: data.audio.content_type || dl.mimeType,
+      engineUsed: 'fal-stable-audio-25',
+      promptSummary: prompt,
+      durationSec: totalSec,
+    };
   }
 
   // Fal ACE-Step Score Synthesis
@@ -422,14 +744,14 @@ export async function generateMusicScore(options: {
     `${Math.round(options.bpm)} bpm`,
     options.musicalKey,
     ...options.instrumentationPalette,
-    ...options.beats.map((b) => b.emotion),
+    ...sortedBeats.map((b) => b.emotion),
   ]
     .filter(Boolean)
     .join(', ');
 
   const lyricsLines = options.forceInstrumental
     ? '[inst]'
-    : options.beats
+    : sortedBeats
         .map((b) => `[${b.label}]\n${b.lyricsLine?.trim() || '(instrumental passage)'}`)
         .join('\n');
 
@@ -448,17 +770,10 @@ export async function generateMusicScore(options: {
     throw new Error('Music generation completed without returning an audio file.');
   }
 
-  const dl = await fetch(aceUrl);
-  if (!dl.ok) {
-    throw new Error(`Could not download composed music track (${dl.status}).`);
-  }
-
-  const audioBuffer = Buffer.from(await dl.arrayBuffer());
-  const mime = aceData?.audio?.content_type || 'audio/wav';
+  const dl = await downloadAudioUrl(aceUrl, aceData?.audio?.content_type || 'audio/wav');
   return {
-    audioBuffer,
-    mimeType: mime,
-    ext: mime.includes('mpeg') || mime.includes('mp3') ? 'mp3' : 'wav',
+    ...dl,
+    mimeType: aceData?.audio?.content_type || dl.mimeType,
     engineUsed: 'fal-ace-step',
     promptSummary: prompt,
     durationSec: totalSec,

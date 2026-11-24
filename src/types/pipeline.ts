@@ -132,12 +132,26 @@ export interface FoleyCue {
   engineUsed?: string;
 }
 
+export type FoleyCueEngineId =
+  | 'mirelo_sfx'
+  | 'elevenlabs_sfx'
+  | 'stable_audio_sfx';
+
+export type FoleyBedEngineId =
+  | 'mirelo_v2a'
+  | 'hunyuan_foley'
+  | 'thinksound'
+  | 'mmaudio_v2';
+
 export interface FoleyStageData {
   video: UploadedVideoMeta | null;
+  cueEngine?: FoleyCueEngineId;
+  bedEngine?: FoleyBedEngineId;
   focusPrompt?: string;
   analysisSummary?: string;
   cues: FoleyCue[];
   syncedBedVideoUrl?: string | null;
+  syncedBedAudioUrl?: string | null;
   syncedBedPrompt?: string;
   lastAnalyzedAt?: string;
 }
@@ -166,8 +180,15 @@ export interface EditSfxCue {
   engineUsed?: string;
 }
 
+export type EditSfxEngineId =
+  | 'elevenlabs_sfx'
+  | 'sonilo_sfx'
+  | 'mirelo_sfx'
+  | 'stable_audio_sfx';
+
 export interface EditSfxStageData {
   video: UploadedVideoMeta | null;
+  engine?: EditSfxEngineId;
   editingStyle?: string;
   analysisSummary?: string;
   cues: EditSfxCue[];
@@ -175,7 +196,12 @@ export interface EditSfxStageData {
 }
 
 // --- Stage 4: Music Orchestration & Composition ---
-export type MusicEngineId = 'elevenlabs_music' | 'ace_step';
+export type MusicEngineId =
+  | 'elevenlabs_music'
+  | 'minimax_music'
+  | 'sonilo_music'
+  | 'stable_audio_25'
+  | 'ace_step';
 
 export interface EmotionalBeat {
   id: string;
