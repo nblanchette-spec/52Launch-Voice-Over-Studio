@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
 import path from 'path';
 import { Type } from '@google/genai';
 import {
@@ -9,13 +9,20 @@ import {
   importProjectBackupBundle,
   isSupportedAssetFilename,
   listProjects,
+  resolveProjectAssetPath,
   saveBufferAsset,
   saveDataUrlAsset,
   saveProject,
 } from './projectStore.ts';
 import type {
+  EditSfxCategory,
+  EditSfxCue,
   ElevenLabsTtsModel,
+  EmotionalBeat,
+  FoleyCategory,
+  FoleyCue,
   GeminiTtsModel,
+  MusicEngineId,
   PipelineProject,
   ScriptBriefConfig,
   VoiceProvider,
@@ -23,8 +30,14 @@ import type {
   VoStudioSettings,
 } from '../src/types/pipeline.ts';
 import {
+  DEFAULT_EDIT_SFX_STAGE,
+  DEFAULT_FOLEY_STAGE,
+  DEFAULT_MUSIC_STAGE,
   DEFAULT_VO_SETTINGS,
+  EDIT_SFX_CATEGORIES,
+  EMOTIONAL_BEAT_PRESETS,
   EMOTIONAL_TONES,
+  FOLEY_CATEGORIES,
 } from '../src/utils/voPresets.ts';
 import {
   synthesizeWithGeminiTTS,
@@ -36,9 +49,22 @@ import {
   VALID_ELEVENLABS_MODELS,
 } from './elevenLabsTts.ts';
 import {
+  createClonedVoice,
+  deleteClonedVoice,
+  listClonedVoices,
+  resolveCloneSamplePath,
+  synthesizeWithClonedVoice,
+} from './voiceCloneStore.ts';
+import {
+  generateMusicScore,
+  generateSoundEffect,
+  generateSyncedFoleyVideoBed,
+} from './audioGenHelpers.ts';
+import {
   extractReadableTextFromPdfBuffer,
   formatLlmError,
   generateJsonWithGeminiOrFal,
+  generateJsonWithVideoOrFrames,
   getGeminiClient,
   getLlmStatus,
   type LlmRoutingMode,
@@ -271,7 +297,7 @@ export function createPipelineRouter(): Router {
     }
   });
 
-  // Upload asset
+  // Upload asset (JSON dataUrl)
   router.post('/projects/:id/assets', async (req, res) => {
     try {
       const { dataUrl, prefix } = req.body;
@@ -291,6 +317,49 @@ export function createPipelineRouter(): Router {
       res.status(isClientError ? 400 : 500).json({ error: msg });
     }
   });
+
+  // Upload binary video or audio asset directly (avoids base64 size bloat)
+  router.post(
+    '/projects/:id/upload-media',
+    express.raw({
+      type: ['video/*', 'audio/*', 'application/octet-stream'],
+      limit: '120mb',
+    }),
+    async (req, res) => {
+      try {
+        const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        if (buffer.length === 0) {
+          return res.status(400).json({ error: 'Empty media upload.' });
+        }
+        const rawFilename = String(req.headers['x-media-filename'] || 'video.mp4');
+        const extFromName = path.extname(path.basename(rawFilename)).replace('.', '').toLowerCase();
+        const contentType = String(req.headers['content-type'] || '').toLowerCase();
+        const mimeExtMap: Record<string, string> = {
+          'video/mp4': 'mp4',
+          'video/quicktime': 'mov',
+          'video/webm': 'webm',
+          'audio/mpeg': 'mp3',
+          'audio/mp3': 'mp3',
+          'audio/wav': 'wav',
+          'audio/x-wav': 'wav',
+          'audio/webm': 'webm',
+          'audio/ogg': 'ogg',
+          'audio/mp4': 'm4a',
+        };
+        const ext =
+          mimeExtMap[contentType.split(';')[0].trim()] ||
+          (['mp4', 'mov', 'webm', 'mp3', 'wav', 'ogg', 'm4a'].includes(extFromName)
+            ? extFromName
+            : 'mp4');
+        const prefix = String(req.headers['x-media-prefix'] || 'video').trim() || 'video';
+        const saved = await saveBufferAsset(req.params.id, buffer, prefix, ext);
+        res.json(saved);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Could not save uploaded media.';
+        res.status(msg.includes('Unsupported') ? 400 : 500).json({ error: msg });
+      }
+    }
+  );
 
   // Serve project asset (WAV / MP3 / etc.)
   router.get('/projects/:id/assets/:filename', (req, res) => {
@@ -723,7 +792,70 @@ ${extractedText.slice(0, 24000)}`;
     }
   });
 
-  // Audition a Gemini or ElevenLabs voice (no project mutation)
+  // --- Voice Cloning Routes (Stage 1) ---
+  router.get('/pipeline/voice-clones', async (_req, res) => {
+    try {
+      const clones = await listClonedVoices();
+      res.json({ clones });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not load cloned voices.',
+      });
+    }
+  });
+
+  router.post('/pipeline/voice-clones', async (req, res) => {
+    try {
+      const { name, description, removeBackgroundNoise, preferredMethod, samples } = req.body as {
+        name: string;
+        description?: string;
+        removeBackgroundNoise?: boolean;
+        preferredMethod?: 'elevenlabs' | 'chatterbox';
+        samples: Array<{ filename: string; dataUrl: string }>;
+      };
+
+      const profile = await createClonedVoice({
+        name,
+        description,
+        removeBackgroundNoise,
+        preferredMethod,
+        samples,
+      });
+      const clones = await listClonedVoices();
+      res.json({ clone: profile, clones });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Voice cloning failed.',
+      });
+    }
+  });
+
+  router.delete('/pipeline/voice-clones/:id', async (req, res) => {
+    try {
+      await deleteClonedVoice(req.params.id);
+      const clones = await listClonedVoices();
+      res.json({ clones });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not delete cloned voice.',
+      });
+    }
+  });
+
+  router.get('/cloned-voices/samples/:filename', (req, res) => {
+    const resolved = resolveCloneSamplePath(req.params.filename);
+    if (!resolved) {
+      return res.status(400).json({ error: 'Invalid clone sample filename.' });
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(resolved, (err) => {
+      if (err && !res.headersSent) {
+        res.status(404).json({ error: 'Sample not found.' });
+      }
+    });
+  });
+
+  // Audition a Gemini, ElevenLabs, or Cloned voice (no project mutation)
   router.post('/pipeline/vo-audition', async (req, res) => {
     try {
       const {
@@ -757,6 +889,30 @@ ${extractedText.slice(0, 24000)}`;
       const sampleText =
         (text && text.trim()) ||
         'Designed for quiet precision when every second counts.';
+
+      if (provider === 'clone') {
+        const tts = await synthesizeWithClonedVoice({
+          clonedVoiceId: voiceName || '',
+          text: sampleText,
+          emotionalTone,
+          emotionIntensity,
+          speed,
+          language,
+          ttsModel,
+          stability: elevenLabsStability,
+          similarityBoost: elevenLabsSimilarityBoost,
+          style: elevenLabsStyle,
+        });
+
+        return res.json({
+          audioBase64: tts.audioBase64,
+          mimeType: tts.mimeType,
+          voice: tts.voice,
+          model: tts.model,
+          provider: 'clone',
+          styleDirective: tts.styleDirective,
+        });
+      }
 
       if (provider === 'elevenlabs') {
         const elModel: ElevenLabsTtsModel = VALID_ELEVENLABS_MODELS.includes(
@@ -815,7 +971,7 @@ ${extractedText.slice(0, 24000)}`;
       res.status(500).json({
         error: formatLlmError(
           err,
-          'Could not audition voice. Verify GEMINI_API_KEY, ELEVENLABS_API_KEY, or FAL_KEY in the server environment variables.'
+          'Could not audition voice. Verify GEMINI_API_KEY, ELEVENLABS_API_KEY, or FAL_KEY in Settings > Secrets.'
         ),
       });
     }
@@ -925,7 +1081,36 @@ ${extractedText.slice(0, 24000)}`;
       let resolvedModel: string;
       let styleDirective: string;
 
-      if (activeProvider === 'elevenlabs') {
+      if (activeProvider === 'clone') {
+        const cloneId =
+          voiceName ||
+          targetLine.voiceName ||
+          project.voSettings?.clonedVoiceId ||
+          project.voSettings?.voiceName ||
+          '';
+        const tts = await synthesizeWithClonedVoice({
+          clonedVoiceId: cloneId,
+          text: spokenText,
+          emotionalTone: activeTone,
+          emotionIntensity: activeIntensity,
+          speed: activeSpeed,
+          language: activeLanguage,
+          ttsModel: ttsModel || targetLine.ttsModel || project.voSettings?.ttsModel,
+          stability: elevenLabsStability ?? project.voSettings?.elevenLabsStability,
+          similarityBoost:
+            elevenLabsSimilarityBoost ??
+            project.voSettings?.elevenLabsSimilarityBoost,
+          style: elevenLabsStyle ?? project.voSettings?.elevenLabsStyle,
+        });
+
+        audioBuffer = tts.audioBuffer;
+        audioBase64 = tts.audioBase64;
+        mimeType = tts.mimeType;
+        assetExt = tts.ext;
+        resolvedVoice = cloneId;
+        resolvedModel = tts.model;
+        styleDirective = tts.styleDirective;
+      } else if (activeProvider === 'elevenlabs') {
         const elVoice =
           voiceName ||
           targetLine.voiceName ||
@@ -1174,6 +1359,784 @@ ${JSON.stringify(linesInput)}`;
     } catch (err) {
       res.status(500).json({
         error: formatLlmError(err, 'Could not translate VO script.'),
+      });
+    }
+  });
+
+  // ============================================================================
+  // STAGE 2: FOLEY SFX — Visual Video Analysis & Organic On-Camera Audio Foley
+  // ============================================================================
+  router.post('/pipeline/foley-analyze', async (req, res) => {
+    try {
+      const { projectId, focusPrompt } = req.body as {
+        projectId: string;
+        focusPrompt?: string;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const video = project.foley?.video;
+      if (!video?.assetUrl) {
+        return res.status(400).json({ error: 'Upload a video clip in Stage 2 first.' });
+      }
+
+      const resolved = resolveProjectAssetPath(project.id, video.assetUrl);
+      const durationSec = Math.max(2, Number(video.durationSec) || 15);
+      const categoryList = FOLEY_CATEGORIES.map((c) => `"${c}"`).join(', ');
+
+      const prompt = `You are a Hollywood Supervising Foley Artist analyzing visual footage (${durationSec.toFixed(1)} seconds long).
+Watch every visual action carefully and identify ONLY organic, physically-grounded ON-CAMERA foley sound cues caused by objects, surfaces, bodies, clothing, or real-world environment acoustics in frame (do NOT invent artificial swooshes, trailer hits, or music — those belong to later stages).
+${focusPrompt?.trim() ? `DIRECTOR FOCUS NOTES: ${focusPrompt.trim()}` : ''}
+
+Return a JSON object with:
+- analysisSummary: 1-2 sentence overview of the physical acoustic environment and key on-screen surfaces/materials
+- cues: array of 4 to 14 chronological foley cues covering the ${durationSec.toFixed(1)}s timeline. For each cue:
+  - startTimeSec: exact timestamp in seconds (0 to ${Math.max(0.5, durationSec - 0.5).toFixed(1)})
+  - durationSec: realistic duration in seconds (0.6 to 8.0)
+  - category: strictly one of ${categoryList}
+  - surfaceOrMaterial: physical materials interacting (e.g. "Wet asphalt / rubber running sole", "Ceramic mug / oak table")
+  - visualAction: exact visible physical motion causing the sound
+  - foleyPrompt: crisp studio foley recording prompt describing distance, microphone perspective, material texture, and organic acoustic decay (no music, dry studio foley)`;
+
+      const llmResult = await generateJsonWithVideoOrFrames<{
+        analysisSummary: string;
+        cues: Array<Partial<FoleyCue>>;
+      }>({
+        videoFilePath: resolved?.filePath || null,
+        videoMimeType: video.mimeType,
+        keyframes: video.keyframes,
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            analysisSummary: { type: Type.STRING },
+            cues: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  startTimeSec: { type: Type.NUMBER },
+                  durationSec: { type: Type.NUMBER },
+                  category: { type: Type.STRING },
+                  surfaceOrMaterial: { type: Type.STRING },
+                  visualAction: { type: Type.STRING },
+                  foleyPrompt: { type: Type.STRING },
+                },
+                required: [
+                  'startTimeSec',
+                  'durationSec',
+                  'category',
+                  'surfaceOrMaterial',
+                  'visualAction',
+                  'foleyPrompt',
+                ],
+              },
+            },
+          },
+          required: ['analysisSummary', 'cues'],
+        },
+        jsonSchemaHint: `{ "analysisSummary": "string", "cues": [{ "startTimeSec": 0.5, "durationSec": 2.0, "category": "Footsteps", "surfaceOrMaterial": "Concrete / Rubber", "visualAction": "Runner lands stride on track", "foleyPrompt": "Close organic foley recording of athletic rubber sneakers landing briskly on outdoor rubberized track, natural subtle air" }] }`,
+      });
+
+      const cues: FoleyCue[] = (Array.isArray(llmResult.data?.cues) ? llmResult.data.cues : [])
+        .filter((c) => Boolean(c.foleyPrompt && String(c.foleyPrompt).trim()))
+        .sort((a, b) => Number(a.startTimeSec || 0) - Number(b.startTimeSec || 0))
+        .map((c, idx) => {
+          const cat = FOLEY_CATEGORIES.includes(c.category as FoleyCategory)
+            ? (c.category as FoleyCategory)
+            : 'Props & Handling';
+          return {
+            id: `foley-${Date.now()}-${idx}`,
+            cueNumber: `F${String(idx + 1).padStart(2, '0')}`,
+            startTimeSec: Math.max(0, Math.min(durationSec - 0.3, Number(c.startTimeSec) || 0)),
+            durationSec: Math.max(0.5, Math.min(12, Number(c.durationSec) || 2.0)),
+            category: cat,
+            surfaceOrMaterial: String(c.surfaceOrMaterial || 'Natural surface').trim(),
+            visualAction: String(c.visualAction || 'On-camera movement').trim(),
+            foleyPrompt: String(c.foleyPrompt || '').trim(),
+            promptInfluence: 0.55,
+            gain: 1.0,
+            muted: false,
+            audioUrl: null,
+          };
+        });
+
+      const nextProject: PipelineProject = {
+        ...project,
+        foley: {
+          ...DEFAULT_FOLEY_STAGE,
+          ...(project.foley || {}),
+          video,
+          focusPrompt: focusPrompt ?? project.foley?.focusPrompt,
+          analysisSummary: String(llmResult.data?.analysisSummary || '').trim(),
+          cues,
+          lastAnalyzedAt: new Date().toISOString(),
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Foley Analysis',
+            model: llmResult.modelUsed,
+            prompt: `Analyzed "${video.filename}" -> ${cues.length} organic foley cues`,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: formatLlmError(err, 'Could not analyze video for foley.'),
+      });
+    }
+  });
+
+  router.post('/pipeline/foley-generate', async (req, res) => {
+    try {
+      const { projectId, cueId, foleyPrompt, durationSec, promptInfluence } = req.body as {
+        projectId: string;
+        cueId: string;
+        foleyPrompt?: string;
+        durationSec?: number;
+        promptInfluence?: number;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const cues = project.foley?.cues || [];
+      const target = cues.find((c) => c.id === cueId);
+      if (!target) {
+        return res.status(404).json({ error: 'Foley cue not found.' });
+      }
+
+      const finalPrompt = (foleyPrompt ?? target.foleyPrompt).trim();
+      const finalDuration = durationSec ?? target.durationSec;
+      const finalInfluence = promptInfluence ?? target.promptInfluence;
+
+      const generated = await generateSoundEffect({
+        prompt: finalPrompt,
+        durationSec: finalDuration,
+        promptInfluence: finalInfluence,
+      });
+
+      const savedAsset = await saveBufferAsset(
+        project.id,
+        generated.audioBuffer,
+        `foley-${target.cueNumber.toLowerCase()}`,
+        generated.ext
+      );
+
+      const nextCues = cues.map((c) =>
+        c.id === cueId
+          ? {
+              ...c,
+              foleyPrompt: finalPrompt,
+              durationSec: finalDuration,
+              promptInfluence: finalInfluence,
+              audioUrl: savedAsset.url,
+              engineUsed: generated.engineUsed,
+            }
+          : c
+      );
+
+      const nextProject: PipelineProject = {
+        ...project,
+        foley: {
+          ...DEFAULT_FOLEY_STAGE,
+          ...(project.foley || {}),
+          cues: nextCues,
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Foley Audio',
+            shotId: target.cueNumber,
+            model: generated.engineUsed,
+            prompt: finalPrompt,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved, audioUrl: savedAsset.url });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not generate foley audio.',
+      });
+    }
+  });
+
+  router.post('/pipeline/foley-video-bed', async (req, res) => {
+    try {
+      const { projectId, prompt } = req.body as {
+        projectId: string;
+        prompt?: string;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const video = project.foley?.video;
+      if (!video?.assetUrl) {
+        return res.status(400).json({ error: 'Upload a video clip in Stage 2 first.' });
+      }
+      const resolved = resolveProjectAssetPath(project.id, video.assetUrl);
+      if (!resolved) {
+        return res.status(400).json({ error: 'Uploaded video file could not be located on disk.' });
+      }
+
+      const bedPrompt =
+        prompt?.trim() ||
+        project.foley?.analysisSummary ||
+        'Realistic organic on-camera foley audio synced to visible movement and physical materials';
+
+      const generated = await generateSyncedFoleyVideoBed({
+        videoFilePath: resolved.filePath,
+        videoMimeType: video.mimeType,
+        prompt: bedPrompt,
+        durationSec: Math.min(30, Math.max(2, Math.round(video.durationSec || 8))),
+      });
+
+      const savedAsset = await saveBufferAsset(
+        project.id,
+        generated.videoBuffer,
+        'foley-bed',
+        generated.ext
+      );
+
+      const nextProject: PipelineProject = {
+        ...project,
+        foley: {
+          ...DEFAULT_FOLEY_STAGE,
+          ...(project.foley || {}),
+          syncedBedVideoUrl: savedAsset.url,
+          syncedBedPrompt: bedPrompt,
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Foley Video Bed',
+            model: generated.engineUsed,
+            prompt: bedPrompt,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved, syncedBedVideoUrl: savedAsset.url });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not synthesize full-video foley bed.',
+      });
+    }
+  });
+
+  // ============================================================================
+  // STAGE 3: EDIT SFX — Transitions, Swooshes & Graphical Sound Design
+  // ============================================================================
+  router.post('/pipeline/sfx-analyze', async (req, res) => {
+    try {
+      const { projectId, editingStyle } = req.body as {
+        projectId: string;
+        editingStyle?: string;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const video = project.editSfx?.video;
+      if (!video?.assetUrl) {
+        return res.status(400).json({ error: 'Upload a video clip in Stage 3 first.' });
+      }
+
+      const resolved = resolveProjectAssetPath(project.id, video.assetUrl);
+      const durationSec = Math.max(2, Number(video.durationSec) || 15);
+      const categoryList = EDIT_SFX_CATEGORIES.map((c) => `"${c}"`).join(', ');
+
+      const prompt = `You are a Senior Sound Designer & Trailer Editor analyzing this ${durationSec.toFixed(1)}-second video edit.
+Identify exact timestamps for EDITORIAL & GRAPHICAL sound effects that heighten the cut — such as camera whip pans, hard cuts, speed ramps, motion graphics/titles appearing, UI clicks, light leaks, logo reveals, zoom punches, and energy shifts (do NOT generate footsteps or natural foley here — focus on editorial transition swooshes, risers, hits, pops, glitches, and sub drops).
+EDITING STYLE DIRECTION: ${editingStyle?.trim() || 'Modern sleek commercial cut with crisp transitions'}
+
+Return a JSON object with:
+- analysisSummary: 1-2 sentence overview of the editing rhythm and visual transition motifs
+- cues: array of 4 to 14 chronological editorial SFX cues within 0s-${durationSec.toFixed(1)}s. For each cue:
+  - startTimeSec: exact timestamp in seconds (note: place risers ~1-2s BEFORE the hit!)
+  - durationSec: realistic duration (0.5 to 4.5s)
+  - category: strictly one of ${categoryList}
+  - editEvent: what visual cut, camera move, or graphic animation occurs at this timestamp
+  - sfxPrompt: detailed sound design synthesis prompt (clean, punchy, studio mastered, dry without music)`;
+
+      const llmResult = await generateJsonWithVideoOrFrames<{
+        analysisSummary: string;
+        cues: Array<Partial<EditSfxCue>>;
+      }>({
+        videoFilePath: resolved?.filePath || null,
+        videoMimeType: video.mimeType,
+        keyframes: video.keyframes,
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            analysisSummary: { type: Type.STRING },
+            cues: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  startTimeSec: { type: Type.NUMBER },
+                  durationSec: { type: Type.NUMBER },
+                  category: { type: Type.STRING },
+                  editEvent: { type: Type.STRING },
+                  sfxPrompt: { type: Type.STRING },
+                },
+                required: ['startTimeSec', 'durationSec', 'category', 'editEvent', 'sfxPrompt'],
+              },
+            },
+          },
+          required: ['analysisSummary', 'cues'],
+        },
+        jsonSchemaHint: `{ "analysisSummary": "string", "cues": [{ "startTimeSec": 2.4, "durationSec": 1.0, "category": "Whoosh & Swoosh", "editEvent": "Fast whip pan into product close-up", "sfxPrompt": "Crisp fast aerodynamic camera whip-pan air whoosh transition, dry studio sound design" }] }`,
+      });
+
+      const cues: EditSfxCue[] = (Array.isArray(llmResult.data?.cues) ? llmResult.data.cues : [])
+        .filter((c) => Boolean(c.sfxPrompt && String(c.sfxPrompt).trim()))
+        .sort((a, b) => Number(a.startTimeSec || 0) - Number(b.startTimeSec || 0))
+        .map((c, idx) => {
+          const cat = EDIT_SFX_CATEGORIES.includes(c.category as EditSfxCategory)
+            ? (c.category as EditSfxCategory)
+            : 'Whoosh & Swoosh';
+          return {
+            id: `sfx-${Date.now()}-${idx}`,
+            cueNumber: `E${String(idx + 1).padStart(2, '0')}`,
+            startTimeSec: Math.max(0, Math.min(durationSec - 0.3, Number(c.startTimeSec) || 0)),
+            durationSec: Math.max(0.5, Math.min(8, Number(c.durationSec) || 1.2)),
+            category: cat,
+            editEvent: String(c.editEvent || 'Visual edit transition').trim(),
+            sfxPrompt: String(c.sfxPrompt || '').trim(),
+            promptInfluence: 0.6,
+            gain: 1.0,
+            muted: false,
+            audioUrl: null,
+          };
+        });
+
+      const nextProject: PipelineProject = {
+        ...project,
+        editSfx: {
+          ...DEFAULT_EDIT_SFX_STAGE,
+          ...(project.editSfx || {}),
+          video,
+          editingStyle: editingStyle ?? project.editSfx?.editingStyle,
+          analysisSummary: String(llmResult.data?.analysisSummary || '').trim(),
+          cues,
+          lastAnalyzedAt: new Date().toISOString(),
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Edit SFX Analysis',
+            model: llmResult.modelUsed,
+            prompt: `Analyzed "${video.filename}" -> ${cues.length} editorial SFX cues`,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: formatLlmError(err, 'Could not analyze video for editorial SFX.'),
+      });
+    }
+  });
+
+  router.post('/pipeline/sfx-generate', async (req, res) => {
+    try {
+      const { projectId, cueId, sfxPrompt, durationSec, promptInfluence } = req.body as {
+        projectId: string;
+        cueId: string;
+        sfxPrompt?: string;
+        durationSec?: number;
+        promptInfluence?: number;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const cues = project.editSfx?.cues || [];
+      const target = cues.find((c) => c.id === cueId);
+      if (!target) {
+        return res.status(404).json({ error: 'Edit SFX cue not found.' });
+      }
+
+      const finalPrompt = (sfxPrompt ?? target.sfxPrompt).trim();
+      const finalDuration = durationSec ?? target.durationSec;
+      const finalInfluence = promptInfluence ?? target.promptInfluence;
+
+      const generated = await generateSoundEffect({
+        prompt: finalPrompt,
+        durationSec: finalDuration,
+        promptInfluence: finalInfluence,
+      });
+
+      const savedAsset = await saveBufferAsset(
+        project.id,
+        generated.audioBuffer,
+        `sfx-${target.cueNumber.toLowerCase()}`,
+        generated.ext
+      );
+
+      const nextCues = cues.map((c) =>
+        c.id === cueId
+          ? {
+              ...c,
+              sfxPrompt: finalPrompt,
+              durationSec: finalDuration,
+              promptInfluence: finalInfluence,
+              audioUrl: savedAsset.url,
+              engineUsed: generated.engineUsed,
+            }
+          : c
+      );
+
+      const nextProject: PipelineProject = {
+        ...project,
+        editSfx: {
+          ...DEFAULT_EDIT_SFX_STAGE,
+          ...(project.editSfx || {}),
+          cues: nextCues,
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Edit SFX Audio',
+            shotId: target.cueNumber,
+            model: generated.engineUsed,
+            prompt: finalPrompt,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved, audioUrl: savedAsset.url });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not generate editorial SFX.',
+      });
+    }
+  });
+
+  // ============================================================================
+  // STAGE 4: MUSIC ORCHESTRATION — Video Analysis & Emotional Beats Composition
+  // ============================================================================
+  router.post('/pipeline/music-analyze', async (req, res) => {
+    try {
+      const { projectId, customDirection, preferredGenre } = req.body as {
+        projectId: string;
+        customDirection?: string;
+        preferredGenre?: string;
+      };
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const video = project.music?.video;
+      if (!video?.assetUrl) {
+        return res.status(400).json({ error: 'Upload a video clip in Stage 4 first.' });
+      }
+
+      const resolved = resolveProjectAssetPath(project.id, video.assetUrl);
+      const durationSec = Math.max(5, Math.round(Number(video.durationSec) || 30));
+      const emotionList = EMOTIONAL_BEAT_PRESETS.map((e) => `"${e}"`).join(', ');
+
+      const prompt = `You are a Film Composer & Music Supervisor scoring this ${durationSec}-second video.
+Analyze the visual storytelling, pacing, scene cuts, mood, lighting, and emotional climax moments.
+Map the score into 3 to 6 contiguous, chronological EMOTIONAL BEATS spanning the full ${durationSec}s runtime (each beat should be at least 3 seconds long so sections compose smoothly).
+${preferredGenre?.trim() ? `PREFERRED GENRE: ${preferredGenre.trim()}` : ''}
+${customDirection?.trim() ? `COMPOSER NOTES: ${customDirection.trim()}` : ''}
+
+Return a JSON object with:
+- analysisSummary: 1-2 sentence musical scoring direction explaining how the score evolves with the picture
+- genre: concise musical genre/style (e.g. "Modern Hybrid Electronic" or "Cinematic Orchestral")
+- bpm: integer tempo (60 to 165)
+- musicalKey: musical key (e.g. "D Minor", "C Major", "A Minor")
+- instrumentationPalette: array of 3-6 core instruments
+- beats: array of contiguous emotional beats covering ~${durationSec}s total:
+  - label: short section name (e.g. "Cold Open", "Rising Tension", "Hero Climax", "Warm Outro")
+  - startTimeSec: start second (contiguous from 0)
+  - durationSec: integer duration in seconds (minimum 3)
+  - emotion: strictly one of ${emotionList}
+  - energy: integer intensity 1 to 10
+  - instrumentation: specific arrangement notes for this beat
+  - tempoFeel: e.g. "Sparse half-time", "Driving 16ths", "Broad cinematic sustain"`;
+
+      const llmResult = await generateJsonWithVideoOrFrames<{
+        analysisSummary: string;
+        genre: string;
+        bpm: number;
+        musicalKey: string;
+        instrumentationPalette: string[];
+        beats: Array<Partial<EmotionalBeat>>;
+      }>({
+        videoFilePath: resolved?.filePath || null,
+        videoMimeType: video.mimeType,
+        keyframes: video.keyframes,
+        prompt,
+        thinkingLow: true,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            analysisSummary: { type: Type.STRING },
+            genre: { type: Type.STRING },
+            bpm: { type: Type.INTEGER },
+            musicalKey: { type: Type.STRING },
+            instrumentationPalette: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            beats: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  label: { type: Type.STRING },
+                  startTimeSec: { type: Type.NUMBER },
+                  durationSec: { type: Type.NUMBER },
+                  emotion: { type: Type.STRING },
+                  energy: { type: Type.INTEGER },
+                  instrumentation: { type: Type.STRING },
+                  tempoFeel: { type: Type.STRING },
+                },
+                required: [
+                  'label',
+                  'startTimeSec',
+                  'durationSec',
+                  'emotion',
+                  'energy',
+                  'instrumentation',
+                ],
+              },
+            },
+          },
+          required: [
+            'analysisSummary',
+            'genre',
+            'bpm',
+            'musicalKey',
+            'instrumentationPalette',
+            'beats',
+          ],
+        },
+        jsonSchemaHint: `{ "analysisSummary": "string", "genre": "Modern Hybrid Electronic", "bpm": 114, "musicalKey": "D Minor", "instrumentationPalette": ["Felt Piano", "Strings"], "beats": [{ "label": "Cold Open", "startTimeSec": 0, "durationSec": 8, "emotion": "Intimate & Minimal", "energy": 3, "instrumentation": "Felt piano and subtle sub pad", "tempoFeel": "Half-time" }] }`,
+      });
+
+      let cursor = 0;
+      const beats: EmotionalBeat[] = (Array.isArray(llmResult.data?.beats) ? llmResult.data.beats : [])
+        .filter((b) => Boolean(b.label || b.emotion))
+        .map((b, idx) => {
+          const beatDur = Math.max(3, Math.round(Number(b.durationSec) || 6));
+          const start = typeof b.startTimeSec === 'number' ? Math.max(0, Math.round(b.startTimeSec)) : cursor;
+          cursor = start + beatDur;
+          return {
+            id: `beat-${Date.now()}-${idx}`,
+            label: String(b.label || `Beat ${idx + 1}`).trim(),
+            startTimeSec: start,
+            durationSec: beatDur,
+            emotion: EMOTIONAL_BEAT_PRESETS.includes(String(b.emotion))
+              ? String(b.emotion)
+              : 'Suspenseful & Rising',
+            energy: Math.max(1, Math.min(10, Math.round(Number(b.energy) || 5))),
+            instrumentation: String(b.instrumentation || 'Strings and subtle synth pad').trim(),
+            tempoFeel: String(b.tempoFeel || 'Steady cinematic pulse').trim(),
+          };
+        });
+
+      const nextProject: PipelineProject = {
+        ...project,
+        music: {
+          ...DEFAULT_MUSIC_STAGE,
+          ...(project.music || {}),
+          video,
+          analysisSummary: String(llmResult.data?.analysisSummary || '').trim(),
+          genre: String(llmResult.data?.genre || preferredGenre || 'Modern Hybrid Electronic').trim(),
+          bpm: Math.max(55, Math.min(180, Math.round(Number(llmResult.data?.bpm) || 112))),
+          musicalKey: String(llmResult.data?.musicalKey || 'D Minor').trim(),
+          instrumentationPalette:
+            Array.isArray(llmResult.data?.instrumentationPalette) &&
+            llmResult.data.instrumentationPalette.length > 0
+              ? llmResult.data.instrumentationPalette.slice(0, 8)
+              : DEFAULT_MUSIC_STAGE.instrumentationPalette,
+          customDirection: customDirection ?? project.music?.customDirection ?? '',
+          beats: beats.length > 0 ? beats : DEFAULT_MUSIC_STAGE.beats,
+          lastAnalyzedAt: new Date().toISOString(),
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Music Arc Analysis',
+            model: llmResult.modelUsed,
+            prompt: `Mapped ${beats.length} emotional beats for "${video.filename}"`,
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: formatLlmError(err, 'Could not analyze video emotional arc.'),
+      });
+    }
+  });
+
+  router.post('/pipeline/music-generate', async (req, res) => {
+    try {
+      const {
+        projectId,
+        engine,
+        genre,
+        bpm,
+        musicalKey,
+        forceInstrumental,
+        instrumentationPalette,
+        negativeStyles,
+        customDirection,
+        beats,
+      } = req.body as {
+        projectId: string;
+        engine?: MusicEngineId;
+        genre?: string;
+        bpm?: number;
+        musicalKey?: string;
+        forceInstrumental?: boolean;
+        instrumentationPalette?: string[];
+        negativeStyles?: string;
+        customDirection?: string;
+        beats?: EmotionalBeat[];
+      };
+
+      const project = await getProject(projectId);
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+
+      const musicState = {
+        ...DEFAULT_MUSIC_STAGE,
+        ...(project.music || {}),
+      };
+
+      const finalEngine: MusicEngineId =
+        engine === 'ace_step' ? 'ace_step' : engine || musicState.engine || 'elevenlabs_music';
+      const finalGenre = genre ?? musicState.genre;
+      const finalBpm = bpm ?? musicState.bpm;
+      const finalKey = musicalKey ?? musicState.musicalKey;
+      const finalInst = forceInstrumental ?? musicState.forceInstrumental;
+      const finalPalette = instrumentationPalette ?? musicState.instrumentationPalette;
+      const finalNegative = negativeStyles ?? musicState.negativeStyles;
+      const finalDir = customDirection ?? musicState.customDirection;
+      const finalBeats = Array.isArray(beats) && beats.length > 0 ? beats : musicState.beats;
+
+      const beatsDuration = finalBeats.reduce(
+        (maxEnd, b) => Math.max(maxEnd, (Number(b.startTimeSec) || 0) + (Number(b.durationSec) || 0)),
+        0
+      );
+      const targetDurationSec = Math.max(
+        5,
+        Math.round(musicState.video?.durationSec || beatsDuration || 30)
+      );
+
+      const composed = await generateMusicScore({
+        engine: finalEngine,
+        genre: finalGenre,
+        bpm: finalBpm,
+        musicalKey: finalKey,
+        forceInstrumental: finalInst,
+        instrumentationPalette: finalPalette,
+        negativeStyles: finalNegative,
+        customDirection: finalDir,
+        beats: finalBeats,
+        targetDurationSec,
+      });
+
+      const savedAsset = await saveBufferAsset(
+        project.id,
+        composed.audioBuffer,
+        'score-master',
+        composed.ext
+      );
+
+      const newTake = {
+        id: `take-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        engine: finalEngine,
+        audioUrl: savedAsset.url,
+        durationSec: composed.durationSec,
+        promptSummary: `${finalGenre} · ${finalBpm} BPM · ${finalBeats.length} beats`,
+      };
+
+      const nextProject: PipelineProject = {
+        ...project,
+        music: {
+          ...musicState,
+          engine: finalEngine,
+          genre: finalGenre,
+          bpm: finalBpm,
+          musicalKey: finalKey,
+          forceInstrumental: finalInst,
+          instrumentationPalette: finalPalette,
+          negativeStyles: finalNegative,
+          customDirection: finalDir,
+          beats: finalBeats,
+          masterAudioUrl: savedAsset.url,
+          takes: [newTake, ...(musicState.takes || [])].slice(0, 12),
+        },
+        generationLog: [
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            step: 'Music Score',
+            model: composed.engineUsed,
+            prompt: composed.promptSummary.slice(0, 320),
+            seed: null,
+            status: 'success',
+          },
+          ...project.generationLog,
+        ],
+      };
+
+      const saved = await saveProject(nextProject);
+      res.json({ project: saved, masterAudioUrl: savedAsset.url, take: newTake });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Could not compose music score.',
       });
     }
   });

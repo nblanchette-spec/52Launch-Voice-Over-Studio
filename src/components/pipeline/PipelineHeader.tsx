@@ -6,16 +6,23 @@ import {
   Plus,
   Cpu,
   Trash2,
+  Mic2,
+  Footprints,
+  Zap,
+  Music,
 } from 'lucide-react';
 import {
   PipelineProject,
   ProjectSummary,
+  StudioStageNumber,
 } from '../../types/pipeline';
 import type { LlmRoutingMode } from '../../utils/llmClient';
 
 interface PipelineHeaderProps {
   projects: ProjectSummary[];
   activeProject: PipelineProject | null;
+  activeStage: StudioStageNumber;
+  onSelectStage: (stage: StudioStageNumber) => void;
   onSelectProject: (id: string) => void;
   onStartNewProject: () => void;
   onDeleteProject: (id: string) => void;
@@ -30,6 +37,8 @@ interface PipelineHeaderProps {
 export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
   projects,
   activeProject,
+  activeStage,
+  onSelectStage,
   onSelectProject,
   onStartNewProject,
   onDeleteProject,
@@ -42,12 +51,49 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
 }) => {
   const importInputRef = useRef<HTMLInputElement>(null);
 
+  const stageTabs: Array<{
+    stage: StudioStageNumber;
+    title: string;
+    subtitle: string;
+    badge?: string;
+    Icon: React.FC<{ className?: string }>;
+  }> = [
+    {
+      stage: 1,
+      title: '1. Script, VO & Cloning',
+      subtitle: 'Gemini TTS · ElevenLabs · Voice Clone',
+      badge: activeProject ? `${activeProject.voScript.length} lines` : undefined,
+      Icon: Mic2,
+    },
+    {
+      stage: 2,
+      title: '2. Foley SFX',
+      subtitle: 'Organic On-Camera Audio from Video',
+      badge: activeProject ? `${activeProject.foley?.cues.length || 0} cues` : undefined,
+      Icon: Footprints,
+    },
+    {
+      stage: 3,
+      title: '3. Edit SFX',
+      subtitle: 'Swooshes, Hits & Graphical FX',
+      badge: activeProject ? `${activeProject.editSfx?.cues.length || 0} fx` : undefined,
+      Icon: Zap,
+    },
+    {
+      stage: 4,
+      title: '4. Music Score',
+      subtitle: 'Orchestration & Emotional Beats',
+      badge: activeProject ? `${activeProject.music?.beats.length || 0} beats` : undefined,
+      Icon: Music,
+    },
+  ];
+
   return (
     <header className="no-print sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-[#E2E2E6]">
       {/* Thin 52Launch Red #5 top brand rule */}
       <div className="h-[3px] w-full bg-gradient-to-r from-[#C6202F] via-[#891A23] to-[#C6202F]" />
 
-      {/* Top Row: 52Launch Wordmark, Script Session Selector, Primary Actions */}
+      {/* Top Row: 52Launch Wordmark, Session Selector, Primary Actions */}
       <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-3">
         <div className="flex items-center gap-3.5 min-w-0">
           <div className="flex items-center gap-2.5 shrink-0">
@@ -61,7 +107,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
               aria-hidden="true"
             />
             <span className="hidden sm:inline-block text-xs font-semibold tracking-tight text-[#5A5A66] whitespace-nowrap font-display">
-              Voice Over Studio
+              Audio Production Studio
             </span>
           </div>
 
@@ -69,10 +115,10 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             /
           </span>
 
-          {/* Script Session Picker */}
+          {/* Session Picker */}
           <div className="relative flex items-center">
             <select
-              aria-label="Choose script session"
+              aria-label="Choose studio session"
               value={activeProject?.id || ''}
               onChange={(e) => {
                 if (e.target.value) {
@@ -96,16 +142,16 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] brand-corner-sm transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
           >
             <Plus className="w-3.5 h-3.5" />
-            New script
+            New session
           </button>
 
           {activeProject && projects.length > 1 && (
             <button
               type="button"
               onClick={() => onDeleteProject(activeProject.id)}
-              title="Delete current script session"
+              title="Delete current studio session"
               className="p-1.5 text-[#6E6E7A] hover:text-[#C6202F] bg-white border border-[#D8D8DF] hover:border-[#C6202F] rounded-md transition-colors cursor-pointer"
-              aria-label="Delete current script session"
+              aria-label="Delete current studio session"
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -116,7 +162,7 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
           {onChangeLlmMode && (
             <div
               className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs bg-[#F6F6F7] border border-[#D8D8DF] rounded-md"
-              title="Choose how script writing & translation routes between Google Gemini Direct and Gemini via Fal"
+              title="Choose how script writing, video analysis & translation route between Google Gemini Direct and Gemini via Fal"
             >
               <Cpu className="w-3.5 h-3.5 text-[#891A23] shrink-0" />
               <span className="text-[11px] font-medium text-[#5A5A66] hidden md:inline">
@@ -176,6 +222,64 @@ export const PipelineHeader: React.FC<PipelineHeaderProps> = ({
           )}
         </div>
       </div>
+
+      {/* Bottom Row: 4 Independent Audio Production Stages */}
+      <nav
+        aria-label="Independent Audio Studio Stages"
+        className="border-t border-[#ECECF0] bg-[#FAFBFD] px-5 py-2 overflow-x-auto"
+      >
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 lg:grid-cols-4 gap-2 min-w-[640px]">
+          {stageTabs.map((tab) => {
+            const active = activeStage === tab.stage;
+            const Icon = tab.Icon;
+            return (
+              <button
+                key={tab.stage}
+                type="button"
+                onClick={() => onSelectStage(tab.stage)}
+                className={`flex items-center justify-between gap-2 px-3.5 py-2 rounded-lg border text-left transition-all cursor-pointer ${
+                  active
+                    ? 'bg-[#111114] border-[#111114] text-white shadow-xs'
+                    : 'bg-white border-[#E2E2E6] hover:border-[#C6202F] text-[#24242B]'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div
+                    className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
+                      active
+                        ? 'bg-[#C6202F] text-white'
+                        : 'bg-[#F6F6F7] text-[#C6202F]'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold truncate">{tab.title}</div>
+                    <div
+                      className={`text-[10px] truncate ${
+                        active ? 'text-[#B8B8C4]' : 'text-[#6E6E7A]'
+                      }`}
+                    >
+                      {tab.subtitle}
+                    </div>
+                  </div>
+                </div>
+                {tab.badge && (
+                  <span
+                    className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 ${
+                      active
+                        ? 'bg-white/15 text-white'
+                        : 'bg-[#F3F3F6] text-[#5A5A66]'
+                    }`}
+                  >
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
     </header>
   );
 };

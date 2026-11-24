@@ -1,3 +1,4 @@
+import fs from 'fs/promises';
 import zlib from 'zlib';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { fal } from '@fal-ai/client';
@@ -21,6 +22,10 @@ export interface LlmInlinePart {
     data: string;
     mimeType: string;
   };
+  fileData?: {
+    fileUri: string;
+    mimeType: string;
+  };
   filename?: string;
 }
 
@@ -32,6 +37,7 @@ export interface LlmJsonCallOptions {
   parts?: LlmInlinePart[];
   thinkingLow?: boolean;
   preferFal?: boolean;
+  geminiModelOverride?: string;
 }
 
 export interface LlmJsonResult<T> {
@@ -333,11 +339,14 @@ async function callViaGoogleGemini<T>(
   const geminiParts: Array<{
     text?: string;
     inlineData?: { data: string; mimeType: string };
+    fileData?: { fileUri: string; mimeType: string };
   }> = [];
 
   if (opts.parts && opts.parts.length > 0) {
     for (const p of opts.parts) {
-      if (p.inlineData) {
+      if (p.fileData) {
+        geminiParts.push({ fileData: p.fileData });
+      } else if (p.inlineData) {
         geminiParts.push({ inlineData: p.inlineData });
       } else if (p.text) {
         geminiParts.push({ text: p.text });
@@ -365,7 +374,7 @@ async function callViaGoogleGemini<T>(
       ? geminiParts[0].text
       : { parts: geminiParts };
 
-  const geminiModel = getDefaultGeminiTextModel();
+  const geminiModel = opts.geminiModelOverride || getDefaultGeminiTextModel();
   const response = await withGeminiRetry(() =>
     ai.models.generateContent({
       model: geminiModel,
@@ -534,3 +543,152 @@ export async function generateJsonWithGeminiOrFal<T>(
     throw googleErr;
   }
 }
+
+export interface VideoAnalysisCallOptions<T> {
+  videoFilePath?: string | null;
+  videoMimeType?: string;
+  keyframes?: Array<{ timeSec: number; dataUrl: string }>;
+  prompt: string;
+  systemPrompt?: string;
+  responseSchema?: unknown;
+  jsonSchemaHint?: string;
+  thinkingLow?: boolean;
+}
+
+function buildKeyframeParts(
+  keyframes?: Array<{ timeSec: number; dataUrl: string }>
+): LlmInlinePart[] {
+  if (!keyframes || keyframes.length === 0) return [];
+  const parts: LlmInlinePart[] = [];
+  for (const frame of keyframes.slice(0, 10)) {
+    const match = frame.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) continue;
+    parts.push({
+      text: `Video keyframe at t=${frame.timeSec.toFixed(1)}s:`,
+    });
+    parts.push({
+      inlineData: {
+        mimeType: match[1] || 'image/jpeg',
+        data: match[2],
+      },
+    });
+  }
+  return parts;
+}
+
+/**
+ * Analyzes an uploaded video natively via Google Gemini (Files API or inlineData
+ * with gemini-4-hydrogen), or falls back seamlessly to extracted timestamped
+ * storyboard keyframes via Fal OpenRouter Vision if direct Gemini is unavailable.
+ */
+export async function generateJsonWithVideoOrFrames<T>(
+  opts: VideoAnalysisCallOptions<T>
+): Promise<LlmJsonResult<T>> {
+  const mode = runtimeLlmMode;
+  const videoModel = process.env.GEMINI_VIDEO_MODEL?.trim() || 'gemini-4-hydrogen';
+  const frameParts = buildKeyframeParts(opts.keyframes);
+
+  const runFramesFallback = () => {
+    if (frameParts.length === 0 && !opts.videoFilePath) {
+      throw new Error('Upload a playable video clip before running visual analysis.');
+    }
+    return callViaFalGemini<T>({
+      prompt: opts.prompt,
+      systemPrompt: opts.systemPrompt,
+      responseSchema: opts.responseSchema,
+      jsonSchemaHint: opts.jsonSchemaHint,
+      parts: frameParts,
+      thinkingLow: opts.thinkingLow,
+    });
+  };
+
+  if (mode === 'fal_gemini') {
+    return runFramesFallback();
+  }
+
+  const runDirectVideo = async (): Promise<LlmJsonResult<T>> => {
+    const ai = getGeminiClient();
+    let uploadedFileName: string | null = null;
+
+    try {
+      const videoParts: LlmInlinePart[] = [];
+      if (opts.videoFilePath) {
+        const stat = await fs.stat(opts.videoFilePath);
+        const mime = opts.videoMimeType || 'video/mp4';
+        if (stat.size <= 14 * 1024 * 1024) {
+          const buf = await fs.readFile(opts.videoFilePath);
+          videoParts.push({
+            inlineData: {
+              data: buf.toString('base64'),
+              mimeType: mime,
+            },
+          });
+        } else {
+          let uploaded = await ai.files.upload({
+            file: opts.videoFilePath,
+            config: { mimeType: mime },
+          });
+          uploadedFileName = uploaded.name || null;
+
+          const deadline = Date.now() + 120_000;
+          while (uploaded.state === 'PROCESSING' && Date.now() < deadline) {
+            await sleep(2500);
+            uploaded = await ai.files.get({ name: uploaded.name || '' });
+          }
+          if (uploaded.state === 'FAILED' || !uploaded.uri) {
+            throw new Error('Gemini video processing failed for uploaded file.');
+          }
+          videoParts.push({
+            fileData: {
+              fileUri: uploaded.uri,
+              mimeType: uploaded.mimeType || mime,
+            },
+          });
+        }
+      } else if (frameParts.length > 0) {
+        videoParts.push(...frameParts);
+      }
+
+      return await callViaGoogleGemini<T>({
+        prompt: opts.prompt,
+        systemPrompt: opts.systemPrompt,
+        responseSchema: opts.responseSchema,
+        jsonSchemaHint: opts.jsonSchemaHint,
+        parts: videoParts,
+        thinkingLow: opts.thinkingLow,
+        geminiModelOverride: videoModel,
+      });
+    } finally {
+      if (uploadedFileName) {
+        await ai.files.delete({ name: uploadedFileName }).catch(() => undefined);
+      }
+    }
+  };
+
+  if (mode === 'google_direct') {
+    return runDirectVideo();
+  }
+
+  if (!hasValidGeminiKey()) {
+    if (hasValidFalKey()) {
+      return runFramesFallback();
+    }
+    throw new Error(
+      'Add GEMINI_API_KEY or FAL_KEY to the server environment variables for video analysis.'
+    );
+  }
+
+  try {
+    return await runDirectVideo();
+  } catch (err) {
+    if (hasValidFalKey() && frameParts.length > 0) {
+      console.warn(
+        '[llmHelpers] Direct Gemini video analysis failed; failing over to Fal Vision keyframes:',
+        err instanceof Error ? err.message : String(err)
+      );
+      return runFramesFallback();
+    }
+    throw err;
+  }
+}
+

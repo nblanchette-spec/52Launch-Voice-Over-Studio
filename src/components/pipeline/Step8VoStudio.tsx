@@ -20,6 +20,7 @@ import {
   Upload,
 } from 'lucide-react';
 import {
+  ClonedVoiceProfile,
   ElevenLabsTtsModel,
   GeminiTtsModel,
   PipelineProject,
@@ -48,14 +49,22 @@ import {
   processAudioWithDSP,
   urlToAudioBuffer,
 } from '../../utils/voAudioEngine';
-import { fetchElevenLabsVoices } from '../../utils/llmClient';
+import {
+  createClonedVoiceApi,
+  deleteClonedVoiceApi,
+  fetchClonedVoices,
+  fetchElevenLabsVoices,
+} from '../../utils/llmClient';
 import { parseJsonResponse } from '../../utils/safeFetch';
+import { VoiceCloneModal } from './VoiceCloneModal';
 
 interface Step8VoStudioProps {
   project: PipelineProject;
   onUpdateProject: (updated: PipelineProject) => Promise<void>;
   onProjectUpdated: (updated: PipelineProject) => void;
   onPreviewPdf?: () => void;
+  elevenLabsConfigured?: boolean;
+  falConfigured?: boolean;
 }
 
 const TIMELINE_SEGMENT_COLORS = [
@@ -96,6 +105,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
   onUpdateProject,
   onProjectUpdated,
   onPreviewPdf,
+  elevenLabsConfigured = true,
+  falConfigured = true,
 }) => {
   const voSettings: VoStudioSettings = useMemo(
     () => ({
@@ -110,6 +121,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
   const [elevenLabsCatalog, setElevenLabsCatalog] = useState<VoicePresetMeta[]>(
     ALL_ELEVENLABS_VOICES
   );
+  const [clonedVoices, setClonedVoices] = useState<ClonedVoiceProfile[]>([]);
+  const [voiceCloneModalOpen, setVoiceCloneModalOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -118,6 +131,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
         if (mounted && Array.isArray(res.voices) && res.voices.length > 0) {
           setElevenLabsCatalog(res.voices);
         }
+      })
+      .catch(() => undefined);
+    void fetchClonedVoices()
+      .then((list) => {
+        if (mounted) setClonedVoices(list);
       })
       .catch(() => undefined);
     return () => {
@@ -240,23 +258,72 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
     [project.voScript]
   );
 
+  const cloneVoicePresets: VoicePresetMeta[] = useMemo(
+    () =>
+      clonedVoices.map((c) => ({
+        id: c.id,
+        displayName: c.name,
+        gender: 'Neutral',
+        timbre: c.method === 'elevenlabs' ? 'ElevenLabs Instant Clone' : 'Zero-Shot Chatterbox Clone',
+        description: c.description || 'Custom cloned voice from uploaded/recorded audio sample.',
+        bestFor: 'Authentic speaker cloning',
+        defaultPitch: 1.0,
+        sampleSentence: 'Designed for quiet precision when every second counts.',
+        tags: ['Cloned'],
+      })),
+    [clonedVoices]
+  );
+
   const activeVoicePresets = useMemo(
     () =>
-      activeProvider === 'elevenlabs'
-        ? elevenLabsCatalog
-        : ALL_GEMINI_VOICE_PRESETS,
-    [activeProvider, elevenLabsCatalog]
+      activeProvider === 'clone'
+        ? cloneVoicePresets
+        : activeProvider === 'elevenlabs'
+          ? elevenLabsCatalog
+          : ALL_GEMINI_VOICE_PRESETS,
+    [activeProvider, cloneVoicePresets, elevenLabsCatalog]
   );
 
   const coreVoicePresets = useMemo(
     () =>
-      activeProvider === 'elevenlabs'
-        ? CORE_ELEVENLABS_VOICES
-        : CORE_GEMINI_VOICES,
-    [activeProvider]
+      activeProvider === 'clone'
+        ? cloneVoicePresets.slice(0, 6)
+        : activeProvider === 'elevenlabs'
+          ? CORE_ELEVENLABS_VOICES
+          : CORE_GEMINI_VOICES,
+    [activeProvider, cloneVoicePresets]
+  );
+
+  const activeCloneProfile = useMemo(
+    () =>
+      activeProvider === 'clone'
+        ? clonedVoices.find(
+            (c) => c.id === (voSettings.clonedVoiceId || voSettings.voiceName)
+          ) || clonedVoices[0] || null
+        : null,
+    [activeProvider, clonedVoices, voSettings.clonedVoiceId, voSettings.voiceName]
   );
 
   const selectedVoiceMeta = useMemo(() => {
+    if (activeProvider === 'clone') {
+      const hit = cloneVoicePresets.find(
+        (v) => v.id === (voSettings.clonedVoiceId || voSettings.voiceName)
+      );
+      return (
+        hit ||
+        cloneVoicePresets[0] || {
+          id: '',
+          displayName: 'No Clone Selected',
+          gender: 'Neutral' as const,
+          timbre: 'Upload or record a sample',
+          description: 'Create a custom voice clone from a 10–30 second solo speech sample.',
+          bestFor: 'Custom Voiceover',
+          defaultPitch: 1.0,
+          sampleSentence: 'Designed for quiet precision when every second counts.',
+          tags: ['Clone'],
+        }
+      );
+    }
     const activeId =
       activeProvider === 'elevenlabs'
         ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
@@ -279,13 +346,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
         tags: ['Custom'],
       };
     }
-    return coreVoicePresets[0];
+    return coreVoicePresets[0] || CORE_GEMINI_VOICES[0];
   }, [
     activeProvider,
     activeVoicePresets,
+    cloneVoicePresets,
     coreVoicePresets,
     voSettings.voiceName,
     voSettings.elevenLabsVoiceId,
+    voSettings.clonedVoiceId,
   ]);
 
   const stopPlayback = useCallback(() => {
@@ -586,7 +655,23 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
   const handleSwitchProvider = (nextProvider: VoiceProvider) => {
     if (nextProvider === activeProvider) return;
-    if (nextProvider === 'elevenlabs') {
+    if (nextProvider === 'clone') {
+      const targetClone =
+        clonedVoices.find((c) => c.id === voSettings.clonedVoiceId) ||
+        clonedVoices[0];
+      updateVoSettings({
+        provider: 'clone',
+        voiceName: targetClone?.id || '',
+        clonedVoiceId: targetClone?.id || '',
+        ttsModel:
+          targetClone?.method === 'chatterbox'
+            ? 'chatterbox_zero_shot'
+            : 'elevenlabs_ivc',
+      });
+      if (clonedVoices.length === 0) {
+        setVoiceCloneModalOpen(true);
+      }
+    } else if (nextProvider === 'elevenlabs') {
       const currentIsEl = elevenLabsCatalog.some(
         (v) => v.id === voSettings.voiceName || v.displayName === voSettings.voiceName
       );
@@ -622,9 +707,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
   const handleApplySettingsToAllLines = () => {
     const chosenVoice =
-      activeProvider === 'elevenlabs'
-        ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
-        : voSettings.voiceName;
+      activeProvider === 'clone'
+        ? voSettings.clonedVoiceId || voSettings.voiceName
+        : activeProvider === 'elevenlabs'
+          ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
+          : voSettings.voiceName;
     const nextLines = project.voScript.map((v) => ({
       ...v,
       provider: activeProvider,
@@ -642,8 +729,14 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       voScript: nextLines,
       voManuallyEdited: true,
     });
+    const provLabel =
+      activeProvider === 'clone'
+        ? 'Cloned Voice'
+        : activeProvider === 'elevenlabs'
+          ? 'ElevenLabs'
+          : 'Gemini';
     setStatusNote(
-      `Applied ${selectedVoiceMeta.displayName} (${activeProvider === 'elevenlabs' ? 'ElevenLabs' : 'Gemini'} · ${voSettings.emotionalTone}) settings across all ${nextLines.length} lines.`
+      `Applied ${selectedVoiceMeta.displayName} (${provLabel} · ${voSettings.emotionalTone}) settings across all ${nextLines.length} lines.`
     );
   };
 
@@ -662,9 +755,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
     const durationSec = 4;
     const nextNum = project.voScript.length + 1;
     const chosenVoice =
-      activeProvider === 'elevenlabs'
-        ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
-        : voSettings.voiceName;
+      activeProvider === 'clone'
+        ? voSettings.clonedVoiceId || voSettings.voiceName
+        : activeProvider === 'elevenlabs'
+          ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
+          : voSettings.voiceName;
     const newLine: VoScriptLine = {
       id: `vo-${Date.now()}`,
       shotId: `C${String(nextNum).padStart(2, '0')}`,
@@ -869,9 +964,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       : line.provider || activeProvider;
 
     const globalVoice =
-      activeProvider === 'elevenlabs'
-        ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
-        : voSettings.voiceName;
+      activeProvider === 'clone'
+        ? voSettings.clonedVoiceId || voSettings.voiceName
+        : activeProvider === 'elevenlabs'
+          ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
+          : voSettings.voiceName;
 
     const activeVoice = voSettings.singleVoiceMode
       ? globalVoice
@@ -880,13 +977,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
     const activeModel = voSettings.singleVoiceMode
       ? voSettings.ttsModel
       : line.ttsModel ||
-        (effectiveProvider === 'elevenlabs'
-          ? isElevenLabsModel(voSettings.ttsModel)
-            ? voSettings.ttsModel
-            : 'eleven_v3'
-          : !isElevenLabsModel(voSettings.ttsModel)
-            ? voSettings.ttsModel
-            : 'gemini-3.8-flash-lite-tts');
+        (effectiveProvider === 'clone'
+          ? 'elevenlabs_ivc'
+          : effectiveProvider === 'elevenlabs'
+            ? isElevenLabsModel(voSettings.ttsModel)
+              ? voSettings.ttsModel
+              : 'eleven_v3'
+            : !isElevenLabsModel(voSettings.ttsModel)
+              ? voSettings.ttsModel
+              : 'gemini-3.8-flash-lite-tts');
 
     const activeTone = line.emotionalTone || voSettings.emotionalTone;
     const activeSpeed = voSettings.singleVoiceMode
@@ -975,7 +1074,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
         }
       }
       const engineLabel =
-        activeProvider === 'elevenlabs' ? 'ElevenLabs' : 'Gemini TTS';
+        activeProvider === 'clone'
+          ? 'Cloned Voice'
+          : activeProvider === 'elevenlabs'
+            ? 'ElevenLabs'
+            : 'Gemini TTS';
       setStatusNote(
         `Rendered ${speakable.length} voiceover clip${speakable.length === 1 ? '' : 's'} with ${engineLabel}.`
       );
@@ -1053,9 +1156,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
 
   const pitchSemitones = pitchRatioToSemitones(voSettings.pitch);
   const currentAuditionVoiceId =
-    activeProvider === 'elevenlabs'
-      ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
-      : voSettings.voiceName;
+    activeProvider === 'clone'
+      ? voSettings.clonedVoiceId || voSettings.voiceName || clonedVoices[0]?.id || ''
+      : activeProvider === 'elevenlabs'
+        ? voSettings.elevenLabsVoiceId?.trim() || voSettings.voiceName
+        : voSettings.voiceName;
 
   return (
     <div className="max-w-[1320px] mx-auto px-6 py-7 space-y-6">
@@ -1241,16 +1346,21 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
       <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-6 items-start">
         {/* LEFT PANEL: Gemini & ElevenLabs Voice Casting & Delivery Studio */}
         <aside className="bg-white border border-[#E2E2E6] rounded-xl p-5 space-y-5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Sliders className="w-4 h-4 text-[#C6202F]" />
               <h2 className="text-sm font-bold text-[#111114]">
-                Voice Casting &amp; Delivery
+                Voice Casting &amp; Cloning
               </h2>
             </div>
-            <span className="text-[11px] font-mono text-[#891A23] bg-[#FDF4F5] border border-[#EABAC0] px-2 py-0.5 rounded">
-              {activeProvider === 'elevenlabs' ? 'ElevenLabs TTS' : 'Gemini 3.8 TTS'}
-            </span>
+            <button
+              type="button"
+              onClick={() => setVoiceCloneModalOpen(true)}
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#891A23] bg-[#FDF4F5] hover:bg-[#F9E4E7] border border-[#EABAC0] px-2.5 py-1 rounded-md cursor-pointer transition-colors"
+            >
+              <Mic2 className="w-3 h-3" />
+              Clone Voice ({clonedVoices.length})
+            </button>
           </div>
 
           {/* Voice Provider Toggle + Engine Model Picker */}
@@ -1258,11 +1368,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
             <label className="text-xs font-medium text-[#3A3A44] block">
               Voice Engine Provider &amp; Model
             </label>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-1.5">
               <button
                 type="button"
                 onClick={() => handleSwitchProvider('gemini')}
-                className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                className={`px-2 py-2 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
                   activeProvider === 'gemini'
                     ? 'bg-[#C6202F] border-[#AD1A27] text-white'
                     : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
@@ -1273,13 +1383,24 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               <button
                 type="button"
                 onClick={() => handleSwitchProvider('elevenlabs')}
-                className={`px-3 py-2 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                className={`px-2 py-2 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
                   activeProvider === 'elevenlabs'
                     ? 'bg-[#C6202F] border-[#AD1A27] text-white'
                     : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
                 }`}
               >
                 ElevenLabs
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSwitchProvider('clone')}
+                className={`px-2 py-2 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                  activeProvider === 'clone'
+                    ? 'bg-[#C6202F] border-[#AD1A27] text-white'
+                    : 'bg-[#F6F6F7] border-[#E2E2E6] text-[#3A3A44] hover:border-[#891A23]'
+                }`}
+              >
+                Cloned Voice
               </button>
             </div>
 
@@ -1302,7 +1423,7 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   </button>
                 ))}
               </div>
-            ) : (
+            ) : activeProvider === 'elevenlabs' ? (
               <div className="grid grid-cols-2 gap-2 pt-0.5">
                 {ELEVENLABS_TTS_MODELS.map((m) => (
                   <button
@@ -1321,6 +1442,25 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                   </button>
                 ))}
               </div>
+            ) : (
+              <div className="p-2.5 rounded-lg bg-[#FDF4F5] border border-[#EABAC0] text-[11px] text-[#6E141C] flex items-center justify-between gap-2">
+                <span>
+                  {activeCloneProfile
+                    ? `Active Clone Engine: ${
+                        activeCloneProfile.method === 'elevenlabs'
+                          ? 'ElevenLabs Instant Clone'
+                          : 'Zero-Shot Chatterbox Clone'
+                      }`
+                    : 'No cloned voices saved yet.'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVoiceCloneModalOpen(true)}
+                  className="px-2 py-1 text-[10px] font-semibold bg-[#C6202F] text-white rounded cursor-pointer shrink-0"
+                >
+                  + New Clone
+                </button>
+              </div>
             )}
           </div>
 
@@ -1328,13 +1468,15 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           <div className="space-y-2.5 pt-1 border-t border-[#E2E2E6]">
             <div className="flex items-center justify-between text-xs">
               <label className="font-medium text-[#3A3A44]">
-                {activeProvider === 'elevenlabs'
-                  ? `Cast Voice (${elevenLabsCatalog.length} ElevenLabs Voices)`
-                  : 'Cast Voice (30 Gemini Studio Voices)'}
+                {activeProvider === 'clone'
+                  ? `Cast Cloned Voice (${clonedVoices.length} Saved)`
+                  : activeProvider === 'elevenlabs'
+                    ? `Cast Voice (${elevenLabsCatalog.length} ElevenLabs Voices)`
+                    : 'Cast Voice (30 Gemini Studio Voices)'}
               </label>
               <button
                 type="button"
-                disabled={auditioningVoiceId !== null}
+                disabled={auditioningVoiceId !== null || !currentAuditionVoiceId}
                 onClick={() =>
                   void handleAuditionVoice(
                     currentAuditionVoiceId,
@@ -1352,55 +1494,101 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               </button>
             </div>
 
-            <select
-              value={voSettings.voiceName}
-              onChange={(e) =>
-                updateVoSettings({
-                  voiceName: e.target.value,
-                  elevenLabsVoiceId: '',
-                })
-              }
-              className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
-            >
-              {activeVoicePresets.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.displayName} ({v.gender}) — {v.timbre}
-                </option>
-              ))}
-            </select>
-
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              {coreVoicePresets.map((voice) => {
-                const selected =
-                  voSettings.voiceName === voice.id &&
-                  !voSettings.elevenLabsVoiceId?.trim();
-                return (
-                  <button
-                    key={voice.id}
-                    type="button"
-                    onClick={() =>
+            {activeProvider === 'clone' && clonedVoices.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setVoiceCloneModalOpen(true)}
+                className="w-full py-3 px-3 border border-dashed border-[#C6202F]/50 bg-[#FDF4F5] rounded-lg text-xs font-semibold text-[#891A23] hover:bg-[#F9E6E8] cursor-pointer"
+              >
+                + Upload Audio Sample or Record Mic to Clone a Voice
+              </button>
+            ) : (
+              <>
+                <select
+                  value={
+                    activeProvider === 'clone'
+                      ? voSettings.clonedVoiceId || voSettings.voiceName
+                      : voSettings.voiceName
+                  }
+                  onChange={(e) => {
+                    if (activeProvider === 'clone') {
+                      const picked = clonedVoices.find((c) => c.id === e.target.value);
                       updateVoSettings({
-                        voiceName: voice.id,
+                        voiceName: e.target.value,
+                        clonedVoiceId: e.target.value,
+                        ttsModel:
+                          picked?.method === 'chatterbox'
+                            ? 'chatterbox_zero_shot'
+                            : 'elevenlabs_ivc',
+                      });
+                    } else {
+                      updateVoSettings({
+                        voiceName: e.target.value,
                         elevenLabsVoiceId: '',
-                      })
+                      });
                     }
-                    className={`text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${
-                      selected
-                        ? 'bg-[#FDF2F3] border-[#C6202F] text-[#111114]'
-                        : 'bg-[#F6F6F7] border-[#E2E2E6] hover:border-[#891A23] text-[#3A3A44]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold">{voice.displayName}</span>
-                      <span className="text-[10px] text-[#5A5A66]">{voice.gender}</span>
-                    </div>
-                    <div className="text-[10px] text-[#5A5A66] mt-0.5 truncate">
-                      {voice.timbre}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+                  }}
+                  className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-3 py-2 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
+                >
+                  {activeVoicePresets.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.displayName} ({v.gender}) — {v.timbre}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  {coreVoicePresets.map((voice) => {
+                    const selected =
+                      activeProvider === 'clone'
+                        ? (voSettings.clonedVoiceId || voSettings.voiceName) === voice.id
+                        : voSettings.voiceName === voice.id &&
+                          !voSettings.elevenLabsVoiceId?.trim();
+                    return (
+                      <button
+                        key={voice.id}
+                        type="button"
+                        onClick={() => {
+                          if (activeProvider === 'clone') {
+                            const picked = clonedVoices.find((c) => c.id === voice.id);
+                            updateVoSettings({
+                              voiceName: voice.id,
+                              clonedVoiceId: voice.id,
+                              ttsModel:
+                                picked?.method === 'chatterbox'
+                                  ? 'chatterbox_zero_shot'
+                                  : 'elevenlabs_ivc',
+                            });
+                          } else {
+                            updateVoSettings({
+                              voiceName: voice.id,
+                              elevenLabsVoiceId: '',
+                            });
+                          }
+                        }}
+                        className={`text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${
+                          selected
+                            ? 'bg-[#FDF2F3] border-[#C6202F] text-[#111114]'
+                            : 'bg-[#F6F6F7] border-[#E2E2E6] hover:border-[#891A23] text-[#3A3A44]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold truncate">
+                            {voice.displayName}
+                          </span>
+                          <span className="text-[10px] text-[#5A5A66] shrink-0">
+                            {voice.gender}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-[#5A5A66] mt-0.5 truncate">
+                          {voice.timbre}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
 
             {activeProvider === 'elevenlabs' && (
               <div className="pt-1">
@@ -1473,7 +1661,8 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
               />
             </div>
 
-            {activeProvider === 'elevenlabs' && (
+            {(activeProvider === 'elevenlabs' ||
+              (activeProvider === 'clone' && activeCloneProfile?.method === 'elevenlabs')) && (
               <>
                 <div>
                   <div className="flex justify-between text-xs mb-1">
@@ -1844,9 +2033,11 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                 const isPlayingThis = activePlayingLineId === line.id;
                 const lineProvider: VoiceProvider = line.provider || activeProvider;
                 const lineVoiceCatalog =
-                  lineProvider === 'elevenlabs'
-                    ? elevenLabsCatalog
-                    : ALL_GEMINI_VOICE_PRESETS;
+                  lineProvider === 'clone'
+                    ? cloneVoicePresets
+                    : lineProvider === 'elevenlabs'
+                      ? elevenLabsCatalog
+                      : ALL_GEMINI_VOICE_PRESETS;
 
                 return (
                   <div
@@ -2056,19 +2247,26 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                                 updateVoLine(line.id, {
                                   provider: nextProv,
                                   voiceName:
-                                    nextProv === 'elevenlabs'
-                                      ? CORE_ELEVENLABS_VOICES[0].id
-                                      : CORE_GEMINI_VOICES[0].id,
+                                    nextProv === 'clone'
+                                      ? clonedVoices[0]?.id || ''
+                                      : nextProv === 'elevenlabs'
+                                        ? CORE_ELEVENLABS_VOICES[0].id
+                                        : CORE_GEMINI_VOICES[0].id,
                                   ttsModel:
-                                    nextProv === 'elevenlabs'
-                                      ? 'eleven_v3'
-                                      : 'gemini-3.8-flash-lite-tts',
+                                    nextProv === 'clone'
+                                      ? clonedVoices[0]?.method === 'chatterbox'
+                                        ? 'chatterbox_zero_shot'
+                                        : 'elevenlabs_ivc'
+                                      : nextProv === 'elevenlabs'
+                                        ? 'eleven_v3'
+                                        : 'gemini-3.8-flash-lite-tts',
                                 });
                               }}
                               className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                             >
                               <option value="gemini">Gemini 3.8 TTS</option>
                               <option value="elevenlabs">ElevenLabs</option>
+                              <option value="clone">Cloned Voice ({clonedVoices.length})</option>
                             </select>
                           </div>
 
@@ -2077,17 +2275,21 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
                               Line Cast Voice
                             </label>
                             <select
-                              value={line.voiceName || lineVoiceCatalog[0]?.id}
+                              value={line.voiceName || lineVoiceCatalog[0]?.id || ''}
                               onChange={(e) =>
                                 updateVoLine(line.id, { voiceName: e.target.value })
                               }
                               className="w-full bg-[#F6F6F7] border border-[#E2E2E6] rounded-lg px-2.5 py-1.5 text-xs text-[#111114] focus:outline-none focus:border-[#C6202F]"
                             >
-                              {lineVoiceCatalog.map((v) => (
-                                <option key={v.id} value={v.id}>
-                                  {v.displayName} ({v.gender})
-                                </option>
-                              ))}
+                              {lineVoiceCatalog.length === 0 ? (
+                                <option value="">No cloned voice yet</option>
+                              ) : (
+                                lineVoiceCatalog.map((v) => (
+                                  <option key={v.id} value={v.id}>
+                                    {v.displayName} ({v.gender})
+                                  </option>
+                                ))
+                              )}
                             </select>
                           </div>
 
@@ -2561,6 +2763,36 @@ export const Step8VoStudio: React.FC<Step8VoStudioProps> = ({
           </div>
         </div>
       )}
+
+      {/* Voice Cloning Studio Modal */}
+      <VoiceCloneModal
+        isOpen={voiceCloneModalOpen}
+        onClose={() => setVoiceCloneModalOpen(false)}
+        existingClones={clonedVoices}
+        elevenLabsConfigured={elevenLabsConfigured}
+        falConfigured={falConfigured}
+        onCreateClone={async (payload) => {
+          const res = await createClonedVoiceApi(payload);
+          setClonedVoices(res.clones);
+          return res.clone;
+        }}
+        onDeleteClone={async (id) => {
+          const next = await deleteClonedVoiceApi(id);
+          setClonedVoices(next);
+        }}
+        onSelectClone={(clone) => {
+          updateVoSettings({
+            provider: 'clone',
+            voiceName: clone.id,
+            clonedVoiceId: clone.id,
+            ttsModel:
+              clone.method === 'chatterbox'
+                ? 'chatterbox_zero_shot'
+                : 'elevenlabs_ivc',
+          });
+          setStatusNote(`Activated cloned voice "${clone.name}".`);
+        }}
+      />
     </div>
   );
 };

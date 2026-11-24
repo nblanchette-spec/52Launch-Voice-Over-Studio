@@ -303,6 +303,56 @@ async function main() {
     assert.equal(importedJson.project.voScript[0].line, 'Precision meets emotion.');
     assert.equal(importedJson.project.voScript[1].speaker, 'Talent');
 
+    console.log('6b. Checking Voice Cloning validation, binary video upload, and Stage 2-4 guards...');
+    const clonesListRes = await fetch(`${baseUrl}/api/pipeline/voice-clones`, {
+      headers: { Authorization: BASIC_AUTH_HEADER },
+    });
+    assert.equal(clonesListRes.status, 200, 'GET /api/pipeline/voice-clones must return 200');
+    const clonesJson = await clonesListRes.json();
+    assert.ok(Array.isArray(clonesJson.clones), 'voice-clones response must return clones array');
+
+    const badCloneRes = await fetch(`${baseUrl}/api/pipeline/voice-clones`, {
+      method: 'POST',
+      headers: {
+        Authorization: BASIC_AUTH_HEADER,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: '', samples: [] }),
+    });
+    assert.equal(badCloneRes.status, 400, 'Invalid voice clone payload must return 400');
+
+    const dummyVideoBytes = Buffer.from('00000018667479706d703432000000006d703432', 'hex');
+    const mediaUploadRes = await fetch(`${baseUrl}/api/projects/${project.id}/upload-media`, {
+      method: 'POST',
+      headers: {
+        Authorization: BASIC_AUTH_HEADER,
+        'Content-Type': 'video/mp4',
+        'X-Media-Filename': '../../bad_clip.mp4',
+        'X-Media-Prefix': 'foley-vid',
+      },
+      body: dummyVideoBytes,
+    });
+    assert.equal(mediaUploadRes.status, 200, 'Binary upload-media must succeed');
+    const mediaUploaded = await mediaUploadRes.json();
+    assert.ok(mediaUploaded.url?.startsWith(`/api/projects/${project.id}/assets/foley-vid-`));
+    const mediaFetchRes = await fetch(`${baseUrl}${mediaUploaded.url}`, {
+      headers: { Authorization: BASIC_AUTH_HEADER },
+    });
+    assert.equal(mediaFetchRes.status, 200);
+    assert.equal(mediaFetchRes.headers.get('x-content-type-options'), 'nosniff');
+
+    for (const endpoint of ['/api/pipeline/foley-analyze', '/api/pipeline/sfx-analyze', '/api/pipeline/music-analyze']) {
+      const guardRes = await fetch(`${baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          Authorization: BASIC_AUTH_HEADER,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ projectId: project.id }),
+      });
+      assert.equal(guardRes.status, 400, `${endpoint} must return 400 when stage has no uploaded video`);
+    }
+
     console.log('7. Checking backup export, unsafe backup rejection, restore, and restart persistence...');
     const backupRes = await fetch(`${baseUrl}/api/projects/${project.id}/backup`, {
       headers: { Authorization: BASIC_AUTH_HEADER },

@@ -495,6 +495,113 @@ export async function exportMasterOrStems(params: {
   triggerBlobDownload(zipBlob, `${slug}-vo-stems-${stamp}.zip`);
 }
 
+export async function exportCueTimelineAudioMix(params: {
+  projectName: string;
+  stageSlug: 'foley' | 'edit-sfx';
+  stageTitle: string;
+  totalDurationSec: number;
+  cues: Array<{
+    cueNumber: string;
+    label: string;
+    prompt: string;
+    startTimeSec: number;
+    gain: number;
+    muted?: boolean;
+    audioUrl: string;
+  }>;
+  format: 'wav' | 'mp3';
+  bitrate: 128 | 192 | 320;
+  normalize: boolean;
+  mode: 'master' | 'stems';
+}): Promise<void> {
+  const ctx = getAudioContext();
+  const activeCues = params.cues.filter((c) => !c.muted && Boolean(c.audioUrl));
+  if (activeCues.length === 0) {
+    throw new Error('Generate at least one unmuted audio cue before exporting.');
+  }
+
+  const decoded: Array<{
+    cue: (typeof activeCues)[number];
+    buffer: AudioBuffer;
+  }> = [];
+
+  for (const cue of activeCues) {
+    const buf = await urlToAudioBuffer(cue.audioUrl, ctx);
+    decoded.push({ cue, buffer: buf });
+  }
+
+  const slug =
+    params.projectName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') || 'studio';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+
+  if (params.mode === 'master') {
+    const maxEndSec = decoded.reduce(
+      (max, item) => Math.max(max, item.cue.startTimeSec + item.buffer.duration),
+      params.totalDurationSec || 5
+    );
+    const sampleRate = 44100;
+    const totalFrames = Math.max(sampleRate, Math.ceil(maxEndSec * sampleRate));
+    const offline = new OfflineAudioContext(2, totalFrames, sampleRate);
+
+    for (const item of decoded) {
+      const src = offline.createBufferSource();
+      src.buffer = item.buffer;
+      const gainNode = offline.createGain();
+      gainNode.gain.value = Math.max(0, Math.min(2, item.cue.gain ?? 1));
+      src.connect(gainNode);
+      gainNode.connect(offline.destination);
+      src.start(Math.max(0, item.cue.startTimeSec));
+    }
+
+    const mixedBuffer = await offline.startRendering();
+    const blob =
+      params.format === 'wav'
+        ? audioBufferToWav(mixedBuffer, params.normalize)
+        : audioBufferToMp3(mixedBuffer, params.bitrate, params.normalize);
+    triggerBlobDownload(blob, `${slug}-${params.stageSlug}-mix-${stamp}.${params.format}`);
+    return;
+  }
+
+  const zip = new JSZip();
+  let manifest = `52Launch Sound Studio — ${params.stageTitle} Stems\n`;
+  manifest += `Session: ${params.projectName}\n`;
+  manifest += `Exported: ${new Date().toLocaleString()}\n`;
+  manifest += `--------------------------------------------------\n\n`;
+
+  for (let i = 0; i < decoded.length; i++) {
+    const { cue, buffer } = decoded[i];
+    const blob =
+      params.format === 'wav'
+        ? audioBufferToWav(buffer, params.normalize)
+        : audioBufferToMp3(buffer, params.bitrate, params.normalize);
+    const filename = `${cue.cueNumber}-t${cue.startTimeSec.toFixed(1)}s.${params.format}`;
+    zip.file(filename, blob);
+    manifest += `${filename} | @ ${cue.startTimeSec.toFixed(2)}s (${buffer.duration.toFixed(2)}s) | ${cue.label}: ${cue.prompt}\n`;
+  }
+  zip.file('cue-sheet.txt', manifest);
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+  triggerBlobDownload(zipBlob, `${slug}-${params.stageSlug}-stems-${stamp}.zip`);
+}
+
+export async function exportAudioUrlAsFormat(params: {
+  audioUrl: string;
+  filenameBase: string;
+  format: 'wav' | 'mp3';
+  bitrate?: 128 | 192 | 320;
+  normalize?: boolean;
+}): Promise<void> {
+  const ctx = getAudioContext();
+  const buffer = await urlToAudioBuffer(params.audioUrl, ctx);
+  const blob =
+    params.format === 'wav'
+      ? audioBufferToWav(buffer, Boolean(params.normalize))
+      : audioBufferToMp3(buffer, params.bitrate || 320, Boolean(params.normalize));
+  triggerBlobDownload(blob, `${params.filenameBase}.${params.format}`);
+}
+
 function triggerBlobDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

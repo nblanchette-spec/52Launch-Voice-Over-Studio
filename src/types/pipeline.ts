@@ -1,4 +1,6 @@
-export type VoiceProvider = 'gemini' | 'elevenlabs';
+export type StudioStageNumber = 1 | 2 | 3 | 4;
+
+export type VoiceProvider = 'gemini' | 'elevenlabs' | 'clone';
 
 export type GeminiTtsModel =
   | 'gemini-3.8-flash-tts'
@@ -10,7 +12,20 @@ export type ElevenLabsTtsModel =
   | 'eleven_flash_v2_5'
   | 'eleven_turbo_v2_5';
 
-export type VoTtsModel = GeminiTtsModel | ElevenLabsTtsModel;
+export type VoiceCloneModel = 'elevenlabs_ivc' | 'chatterbox_zero_shot';
+
+export type VoTtsModel = GeminiTtsModel | ElevenLabsTtsModel | VoiceCloneModel;
+
+export interface ClonedVoiceProfile {
+  id: string;
+  name: string;
+  description?: string;
+  method: 'elevenlabs' | 'chatterbox';
+  elevenLabsVoiceId?: string;
+  referenceAudioUrl?: string;
+  removeBackgroundNoise?: boolean;
+  createdAt: string;
+}
 
 export interface VoScriptLine {
   id: string;
@@ -37,6 +52,7 @@ export interface VoStudioSettings {
   provider: VoiceProvider;
   voiceName: string;
   elevenLabsVoiceId?: string;
+  clonedVoiceId?: string;
   emotionalTone: string;
   emotionIntensity: number;
   speed: number;
@@ -74,6 +90,132 @@ export interface ScriptBriefConfig {
   toneNote: string;
 }
 
+// --- Shared Uploaded Video Metadata for Stages 2, 3, 4 ---
+export interface VideoKeyframeSample {
+  timeSec: number;
+  dataUrl: string;
+}
+
+export interface UploadedVideoMeta {
+  assetUrl: string;
+  filename: string;
+  mimeType: string;
+  durationSec: number;
+  width?: number;
+  height?: number;
+  keyframes?: VideoKeyframeSample[];
+  uploadedAt: string;
+}
+
+// --- Stage 2: Organic On-Camera Foley SFX ---
+export type FoleyCategory =
+  | 'Footsteps'
+  | 'Cloth & Movement'
+  | 'Props & Handling'
+  | 'Ambience & Room Tone'
+  | 'Mechanical & Surface'
+  | 'Nature & Weather';
+
+export interface FoleyCue {
+  id: string;
+  cueNumber: string; // F01, F02
+  startTimeSec: number;
+  durationSec: number;
+  category: FoleyCategory;
+  surfaceOrMaterial: string;
+  visualAction: string;
+  foleyPrompt: string;
+  promptInfluence: number;
+  gain: number;
+  muted?: boolean;
+  audioUrl?: string | null;
+  engineUsed?: string;
+}
+
+export interface FoleyStageData {
+  video: UploadedVideoMeta | null;
+  focusPrompt?: string;
+  analysisSummary?: string;
+  cues: FoleyCue[];
+  syncedBedVideoUrl?: string | null;
+  syncedBedPrompt?: string;
+  lastAnalyzedAt?: string;
+}
+
+// --- Stage 3: Editorial / Graphical Transition SFX ---
+export type EditSfxCategory =
+  | 'Whoosh & Swoosh'
+  | 'Impact & Hit'
+  | 'Riser & Swell'
+  | 'UI & Kinetic Pop'
+  | 'Glitch & Stutter'
+  | 'Sub Drop & Boom';
+
+export interface EditSfxCue {
+  id: string;
+  cueNumber: string; // E01, E02
+  startTimeSec: number;
+  durationSec: number;
+  category: EditSfxCategory;
+  editEvent: string;
+  sfxPrompt: string;
+  promptInfluence: number;
+  gain: number;
+  muted?: boolean;
+  audioUrl?: string | null;
+  engineUsed?: string;
+}
+
+export interface EditSfxStageData {
+  video: UploadedVideoMeta | null;
+  editingStyle?: string;
+  analysisSummary?: string;
+  cues: EditSfxCue[];
+  lastAnalyzedAt?: string;
+}
+
+// --- Stage 4: Music Orchestration & Composition ---
+export type MusicEngineId = 'elevenlabs_music' | 'ace_step';
+
+export interface EmotionalBeat {
+  id: string;
+  label: string;
+  startTimeSec: number;
+  durationSec: number;
+  emotion: string;
+  energy: number; // 1 to 10
+  instrumentation: string;
+  tempoFeel?: string;
+  negativeStyles?: string;
+  lyricsLine?: string;
+}
+
+export interface MusicTrackTake {
+  id: string;
+  createdAt: string;
+  engine: MusicEngineId;
+  audioUrl: string;
+  durationSec: number;
+  promptSummary: string;
+}
+
+export interface MusicStageData {
+  video: UploadedVideoMeta | null;
+  analysisSummary?: string;
+  genre: string;
+  bpm: number;
+  musicalKey: string;
+  forceInstrumental: boolean;
+  instrumentationPalette: string[];
+  negativeStyles: string;
+  customDirection: string;
+  engine: MusicEngineId;
+  beats: EmotionalBeat[];
+  masterAudioUrl?: string | null;
+  takes: MusicTrackTake[];
+  lastAnalyzedAt?: string;
+}
+
 export interface PipelineProject {
   id: string;
   createdAt: string;
@@ -88,6 +230,9 @@ export interface PipelineProject {
   voHasGenerated?: boolean;
   voManuallyEdited?: boolean;
   voSettings?: VoStudioSettings;
+  foley?: FoleyStageData;
+  editSfx?: EditSfxStageData;
+  music?: MusicStageData;
   generationLog: GenerationLogEntry[];
 }
 
@@ -98,4 +243,7 @@ export interface ProjectSummary {
   updatedAt: string;
   voReadyCount: number;
   totalVoCount: number;
+  foleyCount?: number;
+  editSfxCount?: number;
+  musicBeatCount?: number;
 }

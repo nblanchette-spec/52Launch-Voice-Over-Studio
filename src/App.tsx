@@ -1,8 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Loader2, Mic2, Plus, X } from 'lucide-react';
-import { PipelineProject, ProjectSummary } from './types/pipeline';
+import {
+  PipelineProject,
+  ProjectSummary,
+  StudioStageNumber,
+  UploadedVideoMeta,
+} from './types/pipeline';
 import { PipelineHeader } from './components/pipeline/PipelineHeader';
 import { Step8VoStudio } from './components/pipeline/Step8VoStudio';
+import { Stage2FoleyStudio } from './components/pipeline/Stage2FoleyStudio';
+import { Stage3EditSfxStudio } from './components/pipeline/Stage3EditSfxStudio';
+import { Stage4MusicStudio } from './components/pipeline/Stage4MusicStudio';
 import { PrintableVoScriptView } from './components/pipeline/PrintableVoScriptView';
 import {
   getLlmRoutingStatus,
@@ -15,6 +23,7 @@ import { parseJsonResponse } from './utils/safeFetch';
 export default function App() {
   const [projectSummaries, setProjectSummaries] = useState<ProjectSummary[]>([]);
   const [activeProject, setActiveProject] = useState<PipelineProject | null>(null);
+  const [activeStage, setActiveStage] = useState<StudioStageNumber>(1);
   const [showPrintable, setShowPrintable] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -133,6 +142,9 @@ export default function App() {
               updatedAt: saved.updatedAt,
               voReadyCount: saved.voScript.filter((v) => Boolean(v.audioUrl)).length,
               totalVoCount: saved.voScript.length,
+              foleyCount: saved.foley?.cues.length || 0,
+              editSfxCount: saved.editSfx?.cues.length || 0,
+              musicBeatCount: saved.music?.beats.length || 0,
             }
           : s
       )
@@ -151,6 +163,9 @@ export default function App() {
               updatedAt: updated.updatedAt,
               voReadyCount: updated.voScript.filter((v) => Boolean(v.audioUrl)).length,
               totalVoCount: updated.voScript.length,
+              foleyCount: updated.foley?.cues.length || 0,
+              editSfxCount: updated.editSfx?.cues.length || 0,
+              musicBeatCount: updated.music?.beats.length || 0,
             }
           : s
       )
@@ -270,14 +285,37 @@ export default function App() {
     ? projectSummaries.find((p) => p.id === deleteTargetId)
     : null;
 
+  const reusableVideos = useMemo(() => {
+    if (!activeProject) return [];
+    const seenUrls = new Set<string>();
+    const list: Array<{ stageLabel: string; video: UploadedVideoMeta }> = [];
+    const candidates: Array<{ stageLabel: string; video?: UploadedVideoMeta | null }> = [
+      { stageLabel: 'Foley', video: activeProject.foley?.video },
+      { stageLabel: 'Edit SFX', video: activeProject.editSfx?.video },
+      { stageLabel: 'Music', video: activeProject.music?.video },
+    ];
+    for (const c of candidates) {
+      if (c.video?.assetUrl && !seenUrls.has(c.video.assetUrl)) {
+        seenUrls.add(c.video.assetUrl);
+        list.push({ stageLabel: c.stageLabel, video: c.video });
+      }
+    }
+    return list;
+  }, [activeProject]);
+
   return (
     <div className="min-h-screen bg-[#F6F6F7] text-[#111114] flex flex-col">
       <PipelineHeader
         projects={projectSummaries}
         activeProject={activeProject}
+        activeStage={activeStage}
+        onSelectStage={(stage) => {
+          setActiveStage(stage);
+          setShowPrintable(false);
+        }}
         onSelectProject={(id) => {
           void loadProjectById(id).catch((err) =>
-            showNotice(err instanceof Error ? err.message : 'Could not load script.')
+            showNotice(err instanceof Error ? err.message : 'Could not load session.')
           );
         }}
         onStartNewProject={handleOpenNewScriptModal}
@@ -300,7 +338,7 @@ export default function App() {
         {isLoading ? (
           <div className="flex items-center justify-center py-24 gap-2.5 text-sm text-[#5A5A66]">
             <Loader2 className="w-5 h-5 animate-spin text-[#C6202F]" />
-            Loading Voice Over Studio...
+            Loading 52Launch Audio Studio...
           </div>
         ) : !activeProject ? (
           <div className="max-w-lg mx-auto my-20 bg-white border border-[#E2E2E6] rounded-xl p-8 text-center space-y-4 shadow-xs">
@@ -308,10 +346,10 @@ export default function App() {
               <Mic2 className="w-6 h-6" />
             </div>
             <h1 className="text-xl font-bold text-[#111114]">
-              Create your first voiceover script
+              Create your first audio studio session
             </h1>
             <p className="text-xs text-[#5A5A66] leading-relaxed">
-              Write a fresh script with Gemini, paste or upload your own copy, and audition or render voices with Gemini TTS and ElevenLabs.
+              Work independently across 4 stages: Voiceover &amp; Voice Cloning, Video-Synced Foley SFX, Edit Transition SFX, and Emotional Beat Music Scoring.
             </p>
             <button
               type="button"
@@ -319,20 +357,49 @@ export default function App() {
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#C6202F] hover:bg-[#AD1A27] rounded-lg transition-colors cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              New script
+              New session
             </button>
           </div>
-        ) : showPrintable ? (
+        ) : showPrintable && activeStage === 1 ? (
           <PrintableVoScriptView
             project={activeProject}
             onBack={() => setShowPrintable(false)}
           />
-        ) : (
+        ) : activeStage === 1 ? (
           <Step8VoStudio
             project={activeProject}
             onUpdateProject={handleUpdateProject}
             onProjectUpdated={handleProjectUpdated}
             onPreviewPdf={() => setShowPrintable(true)}
+            elevenLabsConfigured={llmStatus?.elevenLabsConfigured ?? true}
+            falConfigured={llmStatus?.falConfigured ?? true}
+          />
+        ) : activeStage === 2 ? (
+          <Stage2FoleyStudio
+            project={activeProject}
+            onUpdateProject={handleUpdateProject}
+            onProjectUpdated={handleProjectUpdated}
+            reusableVideos={reusableVideos}
+            falConfigured={llmStatus?.falConfigured ?? true}
+            elevenLabsConfigured={llmStatus?.elevenLabsConfigured ?? true}
+          />
+        ) : activeStage === 3 ? (
+          <Stage3EditSfxStudio
+            project={activeProject}
+            onUpdateProject={handleUpdateProject}
+            onProjectUpdated={handleProjectUpdated}
+            reusableVideos={reusableVideos}
+            falConfigured={llmStatus?.falConfigured ?? true}
+            elevenLabsConfigured={llmStatus?.elevenLabsConfigured ?? true}
+          />
+        ) : (
+          <Stage4MusicStudio
+            project={activeProject}
+            onUpdateProject={handleUpdateProject}
+            onProjectUpdated={handleProjectUpdated}
+            reusableVideos={reusableVideos}
+            falConfigured={llmStatus?.falConfigured ?? true}
+            elevenLabsConfigured={llmStatus?.elevenLabsConfigured ?? true}
           />
         )}
       </main>

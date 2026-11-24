@@ -4,7 +4,12 @@ import type {
   PipelineProject,
   ProjectSummary,
 } from '../src/types/pipeline.ts';
-import { DEFAULT_VO_SETTINGS } from '../src/utils/voPresets.ts';
+import {
+  DEFAULT_EDIT_SFX_STAGE,
+  DEFAULT_FOLEY_STAGE,
+  DEFAULT_MUSIC_STAGE,
+  DEFAULT_VO_SETTINGS,
+} from '../src/utils/voPresets.ts';
 
 function getDataRoot(): string {
   return path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
@@ -162,6 +167,25 @@ export async function saveBufferAsset(
   };
 }
 
+export function resolveProjectAssetPath(
+  projectId: string,
+  assetUrlOrFilename: string
+): { filePath: string; filename: string } | null {
+  const assetsDir = path.resolve(getProjectAssetsDir(projectId));
+  const rawName = assetUrlOrFilename.includes('/assets/')
+    ? assetUrlOrFilename.split('/assets/').pop() || ''
+    : assetUrlOrFilename;
+  const safeFilename = path.basename(rawName.split('?')[0]);
+  if (!safeFilename || safeFilename !== rawName.split('?')[0] || !isSupportedAssetFilename(safeFilename)) {
+    return null;
+  }
+  const resolved = path.resolve(assetsDir, safeFilename);
+  if (!resolved.startsWith(assetsDir + path.sep)) {
+    return null;
+  }
+  return { filePath: resolved, filename: safeFilename };
+}
+
 export async function seedInitialProjectIfEmpty(): Promise<void> {
   const dataRoot = getDataRoot();
   await ensureDir(dataRoot);
@@ -304,6 +328,9 @@ export function buildProjectSummary(proj: PipelineProject): ProjectSummary {
     updatedAt: proj.updatedAt,
     voReadyCount,
     totalVoCount: voLines.length,
+    foleyCount: proj.foley?.cues?.length ?? 0,
+    editSfxCount: proj.editSfx?.cues?.length ?? 0,
+    musicBeatCount: proj.music?.beats?.length ?? 0,
   };
 }
 
@@ -344,6 +371,25 @@ export async function getProject(projectId: string): Promise<PipelineProject | n
       voSettings: {
         ...DEFAULT_VO_SETTINGS,
         ...(parsed.voSettings || {}),
+      },
+      foley: {
+        ...DEFAULT_FOLEY_STAGE,
+        ...(parsed.foley || {}),
+        cues: Array.isArray(parsed.foley?.cues) ? parsed.foley.cues : [],
+      },
+      editSfx: {
+        ...DEFAULT_EDIT_SFX_STAGE,
+        ...(parsed.editSfx || {}),
+        cues: Array.isArray(parsed.editSfx?.cues) ? parsed.editSfx.cues : [],
+      },
+      music: {
+        ...DEFAULT_MUSIC_STAGE,
+        ...(parsed.music || {}),
+        beats:
+          Array.isArray(parsed.music?.beats) && parsed.music.beats.length > 0
+            ? parsed.music.beats
+            : DEFAULT_MUSIC_STAGE.beats,
+        takes: Array.isArray(parsed.music?.takes) ? parsed.music.takes : [],
       },
       generationLog: Array.isArray(parsed.generationLog) ? parsed.generationLog : [],
     };
@@ -497,6 +543,56 @@ export async function importProjectBackupBundle(bundle: {
     })),
     voHasGenerated: incoming.voHasGenerated,
     voManuallyEdited: incoming.voManuallyEdited,
+    foley: incoming.foley
+      ? {
+          ...DEFAULT_FOLEY_STAGE,
+          ...incoming.foley,
+          video: incoming.foley.video
+            ? {
+                ...incoming.foley.video,
+                assetUrl: rewriteUrl(incoming.foley.video.assetUrl) || incoming.foley.video.assetUrl,
+              }
+            : null,
+          syncedBedVideoUrl: rewriteUrl(incoming.foley.syncedBedVideoUrl),
+          cues: (incoming.foley.cues || []).map((c) => ({
+            ...c,
+            audioUrl: rewriteUrl(c.audioUrl),
+          })),
+        }
+      : { ...DEFAULT_FOLEY_STAGE },
+    editSfx: incoming.editSfx
+      ? {
+          ...DEFAULT_EDIT_SFX_STAGE,
+          ...incoming.editSfx,
+          video: incoming.editSfx.video
+            ? {
+                ...incoming.editSfx.video,
+                assetUrl: rewriteUrl(incoming.editSfx.video.assetUrl) || incoming.editSfx.video.assetUrl,
+              }
+            : null,
+          cues: (incoming.editSfx.cues || []).map((c) => ({
+            ...c,
+            audioUrl: rewriteUrl(c.audioUrl),
+          })),
+        }
+      : { ...DEFAULT_EDIT_SFX_STAGE },
+    music: incoming.music
+      ? {
+          ...DEFAULT_MUSIC_STAGE,
+          ...incoming.music,
+          video: incoming.music.video
+            ? {
+                ...incoming.music.video,
+                assetUrl: rewriteUrl(incoming.music.video.assetUrl) || incoming.music.video.assetUrl,
+              }
+            : null,
+          masterAudioUrl: rewriteUrl(incoming.music.masterAudioUrl),
+          takes: (incoming.music.takes || []).map((t) => ({
+            ...t,
+            audioUrl: rewriteUrl(t.audioUrl) || t.audioUrl,
+          })),
+        }
+      : { ...DEFAULT_MUSIC_STAGE },
     generationLog: Array.isArray(incoming.generationLog) ? incoming.generationLog : [],
   };
 

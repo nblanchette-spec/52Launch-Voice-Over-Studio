@@ -1,6 +1,13 @@
 import type {
+  EditSfxCategory,
+  EditSfxStageData,
   ElevenLabsTtsModel,
+  FoleyCategory,
+  FoleyStageData,
   GeminiTtsModel,
+  MusicEngineId,
+  MusicStageData,
+  VoiceCloneModel,
   VoStudioSettings,
 } from '../types/pipeline.ts';
 
@@ -549,3 +556,221 @@ export const SUPPORTED_LANGUAGES: SupportedLanguage[] = [
   { code: 'sv-SE', name: 'Swedish', nativeName: 'Svenska', flag: '🇸🇪' },
   { code: 'tr-TR', name: 'Turkish', nativeName: 'Türkçe', flag: '🇹🇷' },
 ];
+
+export const VOICE_CLONE_MODELS: Array<{
+  id: VoiceCloneModel;
+  label: string;
+  badge: string;
+  description: string;
+}> = [
+  {
+    id: 'elevenlabs_ivc',
+    label: 'ElevenLabs Instant Clone',
+    badge: 'ELEVENLABS',
+    description: 'Creates a persistent cloned Voice ID via ElevenLabs API (runs across Eleven v3 / Multilingual / Turbo).',
+  },
+  {
+    id: 'chatterbox_zero_shot',
+    label: 'Zero-Shot Reference Clone',
+    badge: 'FAL CHATTERBOX',
+    description: 'Clones voice timbre directly from your uploaded audio sample via Fal.ai with paralinguistic expressiveness.',
+  },
+];
+
+export const FOLEY_CATEGORIES: FoleyCategory[] = [
+  'Footsteps',
+  'Cloth & Movement',
+  'Props & Handling',
+  'Ambience & Room Tone',
+  'Mechanical & Surface',
+  'Nature & Weather',
+];
+
+export const EDIT_SFX_CATEGORIES: EditSfxCategory[] = [
+  'Whoosh & Swoosh',
+  'Impact & Hit',
+  'Riser & Swell',
+  'UI & Kinetic Pop',
+  'Glitch & Stutter',
+  'Sub Drop & Boom',
+];
+
+export const QUICK_EDIT_SFX_PRESETS: Array<{
+  label: string;
+  category: EditSfxCategory;
+  durationSec: number;
+  prompt: string;
+}> = [
+  {
+    label: 'Clean Air Whoosh',
+    category: 'Whoosh & Swoosh',
+    durationSec: 1.0,
+    prompt: 'Crisp, fast aerodynamic camera whip-pan air whoosh transition, clean studio sound design, dry',
+  },
+  {
+    label: 'Sub Bass Drop',
+    category: 'Sub Drop & Boom',
+    durationSec: 2.0,
+    prompt: 'Deep cinematic sub-bass drop impact with smooth warm low-end tail for logo reveal',
+  },
+  {
+    label: 'Kinetic UI Click',
+    category: 'UI & Kinetic Pop',
+    durationSec: 0.6,
+    prompt: 'Modern tactile minimalist UI pop click and subtle glass chime for motion graphic text reveal',
+  },
+  {
+    label: 'Tension Riser',
+    category: 'Riser & Swell',
+    durationSec: 3.0,
+    prompt: 'Smooth cinematic reverse cymbal and filtered synth tension riser building cleanly to peak',
+  },
+  {
+    label: 'Punchy Hit',
+    category: 'Impact & Hit',
+    durationSec: 1.2,
+    prompt: 'Tight modern commercial edit hit punch with crisp transient snap and short low body',
+  },
+  {
+    label: 'Digital Glitch Cut',
+    category: 'Glitch & Stutter',
+    durationSec: 0.8,
+    prompt: 'Short rhythmic digital data glitch stutter transition sound effect, crisp stereo texture',
+  },
+];
+
+export const MUSIC_GENRE_PRESETS: string[] = [
+  'Cinematic Orchestral',
+  'Modern Hybrid Electronic',
+  'Minimal Felt Piano & Strings',
+  'High-Energy Commercial Percussion',
+  'Indie Acoustic & Warm Folk',
+  'Atmospheric Ambient Score',
+  'Sleek Tech & Synth Pulse',
+  'Epic Trailer & Brass',
+];
+
+export const MUSIC_KEYS: string[] = [
+  'C Major',
+  'A Minor',
+  'D Minor',
+  'G Major',
+  'E Minor',
+  'F Major',
+  'B♭ Major',
+  'G Minor',
+  'C Minor',
+  'F♯ Minor',
+];
+
+export const EMOTIONAL_BEAT_PRESETS: string[] = [
+  'Intimate & Minimal',
+  'Curious & Reflective',
+  'Suspenseful & Rising',
+  'Driving & Kinetic',
+  'Triumphant & Heroic',
+  'Hopeful & Warm',
+  'Melancholic & Poignant',
+  'Dark & Industrial',
+  'Playful & Lighthearted',
+  'Euphoric Finale',
+];
+
+export const INSTRUMENTATION_PALETTE: string[] = [
+  'Strings',
+  'Felt Piano',
+  'Brass',
+  'Taiko & Percussion',
+  'Analog Synth Pads',
+  'Sub Bass',
+  'Acoustic Guitar',
+  'Electric Guitar',
+  'Solo Cello',
+  'Woodwinds',
+  'Choir Texture',
+  'Electronic Beat',
+];
+
+export const MUSIC_ENGINES: Array<{
+  id: MusicEngineId;
+  label: string;
+  badge: string;
+  description: string;
+}> = [
+  {
+    id: 'elevenlabs_music',
+    label: 'ElevenLabs Music Composer',
+    badge: 'ELEVENLABS',
+    description: 'Uses structured emotional-beat sections (direct or via Fal) for dynamic multi-beat scoring.',
+  },
+  {
+    id: 'ace_step',
+    label: 'ACE-Step Studio Score',
+    badge: 'FAL ACE-STEP',
+    description: 'High-fidelity tag-driven instrumental/vocal score synthesis via Fal.ai.',
+  },
+];
+
+export const DEFAULT_FOLEY_STAGE: FoleyStageData = {
+  video: null,
+  focusPrompt: '',
+  analysisSummary: '',
+  cues: [],
+  syncedBedVideoUrl: null,
+  syncedBedPrompt: '',
+};
+
+export const DEFAULT_EDIT_SFX_STAGE: EditSfxStageData = {
+  video: null,
+  editingStyle: 'Modern sleek commercial cut',
+  analysisSummary: '',
+  cues: [],
+};
+
+export const DEFAULT_MUSIC_STAGE: MusicStageData = {
+  video: null,
+  analysisSummary: '',
+  genre: 'Modern Hybrid Electronic',
+  bpm: 112,
+  musicalKey: 'D Minor',
+  forceInstrumental: true,
+  instrumentationPalette: ['Felt Piano', 'Strings', 'Analog Synth Pads', 'Sub Bass'],
+  negativeStyles: 'harsh clipping, chaotic noise, vocal chatter',
+  customDirection: '',
+  engine: 'elevenlabs_music',
+  beats: [
+    {
+      id: 'beat-1',
+      label: 'Cold Open / Hook',
+      startTimeSec: 0,
+      durationSec: 8,
+      emotion: 'Intimate & Minimal',
+      energy: 3,
+      instrumentation: 'Soft felt piano and warm low sub pad',
+      tempoFeel: 'Spacious half-time',
+    },
+    {
+      id: 'beat-2',
+      label: 'Momentum Build',
+      startTimeSec: 8,
+      durationSec: 10,
+      emotion: 'Suspenseful & Rising',
+      energy: 6,
+      instrumentation: 'Pulsing analog synth arpeggio, muted strings, subtle percussion',
+      tempoFeel: 'Building 8th-note pulse',
+    },
+    {
+      id: 'beat-3',
+      label: 'Hero Climax & Resolve',
+      startTimeSec: 18,
+      durationSec: 12,
+      emotion: 'Triumphant & Heroic',
+      energy: 9,
+      instrumentation: 'Full soaring string section, driving percussion, warm sub bass',
+      tempoFeel: 'Driving wide-screen',
+    },
+  ],
+  masterAudioUrl: null,
+  takes: [],
+};
+
